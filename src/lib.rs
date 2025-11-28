@@ -47,6 +47,9 @@ impl Parse for JoinMeMaybe {
                 let _ = input.parse::<syn::Token![,]>()?;
             }
         }
+        if arms.iter().all(|arm| arm.is_maybe) {
+            return Err(input.error("At least one arm must be `definitely`"));
+        }
         Ok(Self { arms })
     }
 }
