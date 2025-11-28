@@ -70,26 +70,25 @@ impl ToTokens for JoinMeMaybe {
             cancel_returns.extend(quote! { None, });
         }
 
+        let mut success_returns = TokenStream2::new();
+        for name in &arm_names {
+            success_returns.extend(quote! {
+                // The `definitely` outputs are guaranteed to be `Some` here, but the `maybe` ones
+                // might be `None`.
+                #name.as_mut().take_output(),
+            });
+        }
+
         let mut poll_calls = TokenStream2::new();
         let definitely_finished = format_ident!("definitely_finished", span = Span::mixed_site());
         let cx = format_ident!("cx", span = Span::mixed_site());
         let total_definitely = self.arms.iter().filter(|arm| !arm.is_maybe).count();
         let mut definitely_so_far = 0;
         for (arm, name) in self.arms.iter().zip(&arm_names) {
-            if definitely_so_far < total_definitely {
-                poll_calls.extend(quote! {
-                    if #name.as_mut().output_mut().is_none() {
-                        _ = ::std::future::Future::poll(#name.as_mut(), #cx);
-                    }
-                });
-            } else {
-                poll_calls.extend(quote! {
-                    if !#definitely_finished && #name.as_mut().output_mut().is_none() {
-                        _ = ::std::future::Future::poll(#name.as_mut(), #cx);
-                    }
-                });
-            }
             poll_calls.extend(quote! {
+                if #name.as_mut().output_mut().is_none() {
+                    _ = ::std::future::Future::poll(#name.as_mut(), #cx);
+                }
                 if #cancel_flag.load(::std::sync::atomic::Ordering::Relaxed) {
                     return ::std::task::Poll::Ready((#cancel_returns));
                 }
@@ -99,16 +98,14 @@ impl ToTokens for JoinMeMaybe {
                     #definitely_finished &= #name.as_mut().output_mut().is_some();
                 });
                 definitely_so_far += 1;
+                if definitely_so_far == total_definitely {
+                    poll_calls.extend(quote! {
+                        if #definitely_finished {
+                            return ::std::task::Poll::Ready((#success_returns));
+                        }
+                    });
+                }
             }
-        }
-
-        let mut success_returns = TokenStream2::new();
-        for name in &arm_names {
-            success_returns.extend(quote! {
-                // The `definitely` outputs are guaranteed to be `Some` here, but the `maybe` ones
-                // might be `None`.
-                #name.as_mut().take_output(),
-            });
         }
 
         tokens.extend(quote! {
@@ -122,9 +119,6 @@ impl ToTokens for JoinMeMaybe {
                 ::std::future::poll_fn(|#cx| {
                     let mut #definitely_finished = true;
                     #poll_calls
-                    if #definitely_finished {
-                        return ::std::task::Poll::Ready((#success_returns));
-                    }
                     ::std::task::Poll::Pending
                 }).await
             }
