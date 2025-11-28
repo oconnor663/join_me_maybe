@@ -16,19 +16,19 @@ async fn test_maybe() {
 #[tokio::test]
 async fn test_cancel() {
     let ret = join_me_maybe! {
-        maybe ready(1),
-        definitely ready(2),
+        maybe ready(0),
+        definitely ready(1),
         foo: definitely async {
             sleep(Duration::from_secs(1_000_000)).await;
-            3 // we'll never get here
+            2 // we'll never get here
         },
         maybe async {
             foo.cancel();
-            4
+            3
         },
         // Without the leading underscore here you get an unused variable warning. See
         // `tests/ui/unused_label.rs`.
-        _unused_label: maybe ready(5),
+        _unused_label: maybe ready(4),
     };
-    assert_eq!(ret, (Some(1), Some(2), None, Some(4), None));
+    assert_eq!(ret, (Some(0), Some(1), None, Some(3), None));
 }

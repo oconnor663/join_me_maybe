@@ -89,7 +89,6 @@ impl ToTokens for JoinMeMaybe {
                 let #flag_name = ::core::sync::atomic::AtomicBool::new(false);
             });
             if let Some(label) = &self.arms[i].cancel_label {
-                let struct_name = format_ident!("arm_{i}_canceller", span = Span::mixed_site());
                 let mut count_field = TokenStream2::new();
                 let mut count_field_initialize = TokenStream2::new();
                 let mut cancel_body = TokenStream2::new();
@@ -121,19 +120,21 @@ impl ToTokens for JoinMeMaybe {
                     });
                 }
                 initializers.extend(quote! {
-                    struct #struct_name<'a> {
-                        finished: &'a ::core::sync::atomic::AtomicBool,
-                        #count_field
-                    };
-                    impl<'a> #struct_name<'a> {
-                        fn cancel(&self) {
-                            #cancel_body
-                        }
-                    }
                     // This identifier will be in-scope for caller code in the arms.
-                    let #label = #struct_name{
-                        finished: &#flag_name,
-                        #count_field_initialize
+                    let #label = {
+                        struct Canceller<'a> {
+                            finished: &'a ::core::sync::atomic::AtomicBool,
+                            #count_field
+                        };
+                        impl<'a> Canceller<'a> {
+                            fn cancel(&self) {
+                                #cancel_body
+                            }
+                        }
+                        Canceller {
+                            finished: &#flag_name,
+                            #count_field_initialize
+                        }
                     };
                 });
             }
