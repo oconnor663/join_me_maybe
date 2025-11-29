@@ -74,6 +74,20 @@ async fn test_cancel_already_finished() {
 }
 
 #[tokio::test]
+async fn test_cancel_self() {
+    let ret = join_me_maybe! {
+        foo: definitely async {
+            // This arm is cancelling itself, but it's going to exit anyway. Make sure we don't
+            // screw up the count.
+            foo.cancel();
+            0
+        },
+        definitely ready(1),
+    };
+    assert_eq!(ret, (Some(0), Some(1)));
+}
+
+#[tokio::test]
 async fn test_drop_promptly() {
     let mutex = tokio::sync::Mutex::new(());
     join_me_maybe! {
