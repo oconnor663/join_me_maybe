@@ -32,3 +32,17 @@ async fn test_cancel() {
     };
     assert_eq!(ret, (Some(0), Some(1), None, Some(3), None));
 }
+
+#[tokio::test]
+async fn test_early_exit() {
+    let ret = join_me_maybe! {
+        maybe async {
+            foo.cancel();
+            // Because of this yield, we'll never get to the return value in this arm.
+            sleep(Duration::from_secs(0)).await;
+            0
+        },
+        foo: definitely ready(1),
+    };
+    assert_eq!(ret, (None, None));
+}
