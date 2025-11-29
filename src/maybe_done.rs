@@ -1,6 +1,6 @@
 //! This file was originally copied from the `futures` crate.
 //!
-//! https://github.com/rust-lang/futures-rs/blob/de9274e655b2fff8c9630a259a473b71a6b79dda/futures-util/src/future/maybe_done.rs
+//! <https://github.com/rust-lang/futures-rs/blob/de9274e655b2fff8c9630a259a473b71a6b79dda/futures-util/src/future/maybe_done.rs>
 
 use core::future::Future;
 use core::mem;
