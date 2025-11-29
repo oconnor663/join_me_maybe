@@ -6,7 +6,7 @@ use core::future::ready;
 use join_me_maybe::join_me_maybe;
 
 pub async fn foo() {
-    join_me_maybe! {
+    join_me_maybe!(
         ready(0),
         maybe ready(1),
         cancel1: ready(2),
@@ -14,5 +14,5 @@ pub async fn foo() {
             cancel1.cancel();
             cancel2.cancel();
         }
-    };
+    );
 }

@@ -1,10 +1,10 @@
 error: unexpected end of input, At least one arm must be `definitely`
  --> tests/ui/all_maybe.rs:6:5
   |
-6 | /     join_me_maybe! {
+6 | /     join_me_maybe!(
 7 | |         maybe ready(1),
 8 | |         maybe ready(2),
-9 | |     };
+9 | |     );
   | |_____^
   |
   = note: this error originates in the macro `join_me_maybe` (in Nightly builds, run with -Z macro-backtrace for more info)
