@@ -10,7 +10,7 @@ async fn test_maybe() {
         definitely ready(3),
         maybe ready(4),
     };
-    assert_eq!(ret, (Some(1), Some(2), Some(3), None));
+    assert_eq!(ret, (Some(1), 2, 3, None));
 }
 
 #[tokio::test]
@@ -38,7 +38,7 @@ async fn test_cancel() {
         // `tests/ui/unused_label.rs`.
         _unused_label: maybe ready(6),
     };
-    assert_eq!(ret, (Some(0), Some(1), None, None, Some(4), Some(5), None));
+    assert_eq!(ret, (Some(0), 1, None, None, Some(4), 5, None));
 }
 
 #[tokio::test]
@@ -70,7 +70,7 @@ async fn test_cancel_already_finished() {
             2
         },
     };
-    assert_eq!(ret, (Some(0), Some(1), Some(2)));
+    assert_eq!(ret, (Some(0), 1, 2));
 }
 
 #[tokio::test]
@@ -84,13 +84,13 @@ async fn test_cancel_self() {
         },
         definitely ready(1),
     };
-    assert_eq!(ret, (Some(0), Some(1)));
+    assert_eq!(ret, (Some(0), 1));
 }
 
 #[tokio::test]
 async fn test_drop_promptly() {
     let mutex = tokio::sync::Mutex::new(());
-    join_me_maybe! {
+    let ret = join_me_maybe! {
         foo: definitely async {
             // Polling order is (currently) deterministic, so this arm definitely gets the lock
             // here. If that ever changes we could acquire the guard above and move it in here.
@@ -106,6 +106,7 @@ async fn test_drop_promptly() {
             _ = mutex.lock().await;
         }
     };
+    assert_eq!(ret, (None, ()));
 }
 
 // Most of the cases above rely on simple `ready` futures, but here we do at least one case that
@@ -122,5 +123,5 @@ async fn test_nontrivial_futures() {
             2
         },
     };
-    assert_eq!(ret, (Some(1), Some(2)));
+    assert_eq!(ret, (Some(1), 2));
 }

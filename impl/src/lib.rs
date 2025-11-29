@@ -167,10 +167,18 @@ impl ToTokens for JoinMeMaybe {
         }
 
         let mut return_values = TokenStream2::new();
-        for arm_future in &arm_futures {
-            return_values.extend(quote! {
-                #arm_future.as_mut().take_output(),
-            });
+        for (arm, arm_future) in self.arms.iter().zip(&arm_futures) {
+            if !arm.is_definitely || arm.cancel_label.is_some() {
+                // This arm is cancellable. Keep it wrapped in `Option`.
+                return_values.extend(quote! {
+                    #arm_future.as_mut().take_output(),
+                });
+            } else {
+                // There's no way to cancel this arm without cancelling the whole macro. Unwrap it.
+                return_values.extend(quote! {
+                    #arm_future.as_mut().take_output().expect("this arm can't be cancelled"),
+                });
+            }
         }
 
         tokens.extend(quote! {
