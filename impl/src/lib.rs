@@ -8,11 +8,12 @@ use syn::{
 
 mod kw {
     syn::custom_keyword!(maybe);
-    syn::custom_keyword!(definitely);
 }
 
 struct JoinMeMaybeArm {
     cancel_label: Option<Ident>,
+    // "Definitely" is the opposite of "maybe". Previously there was a `definitely` keyword, but it
+    // was unnecessarily verbose.
     is_definitely: bool,
     body: Expr,
 }
@@ -26,20 +27,16 @@ impl Parse for JoinMeMaybeArm {
         } else {
             None
         };
-        let lookahead = input.lookahead1();
-        let is_definitely = if lookahead.peek(kw::definitely) {
-            _ = input.parse::<kw::definitely>()?;
-            true
-        } else if lookahead.peek(kw::maybe) {
+        let is_maybe = if input.peek(kw::maybe) {
             _ = input.parse::<kw::maybe>()?;
-            false
+            true
         } else {
-            return Err(lookahead.error());
+            false
         };
         let body = input.parse()?;
         Ok(Self {
             cancel_label,
-            is_definitely,
+            is_definitely: !is_maybe,
             body,
         })
     }

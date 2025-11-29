@@ -6,7 +6,7 @@ use std::future::ready;
 #[tokio::main]
 async fn main() {
     join_me_maybe! {
-        definitely ready(1),
+        ready(1),
         unused_label: maybe ready(2),
     };
 }

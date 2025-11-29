@@ -6,8 +6,8 @@ use tokio::time::{Duration, sleep};
 async fn test_maybe() {
     let ret = join_me_maybe! {
         maybe ready(1),
-        definitely ready(2),
-        definitely ready(3),
+        ready(2),
+        ready(3),
         maybe ready(4),
     };
     assert_eq!(ret, (Some(1), 2, 3, None));
@@ -17,8 +17,8 @@ async fn test_maybe() {
 async fn test_cancel() {
     let ret = join_me_maybe! {
         maybe ready(0),
-        definitely ready(1),
-        foo: definitely async {
+        ready(1),
+        foo: async {
             sleep(Duration::from_secs(1_000_000)).await;
             2 // we'll never get here
         },
@@ -30,7 +30,7 @@ async fn test_cancel() {
             foo.cancel();
             4
         },
-        definitely async {
+        async {
             bar.cancel();
             5
         },
@@ -50,7 +50,7 @@ async fn test_early_exit() {
             sleep(Duration::from_secs(0)).await;
             0
         },
-        foo: definitely ready(1),
+        foo: ready(1),
     };
     assert_eq!(ret, (None, None));
 }
@@ -58,14 +58,14 @@ async fn test_early_exit() {
 #[tokio::test]
 async fn test_cancel_already_finished() {
     let ret = join_me_maybe! {
-        foo: definitely ready(0),
-        definitely async {
+        foo: ready(0),
+        async {
             // `foo` will have already finished above by the time we try to cancel it here. This is
             // testing that we don't screw up the count.
             foo.cancel();
             1
         },
-        definitely async {
+        async {
             // Hypothetically if we screwed up the count, we might skip this arm.
             2
         },
@@ -76,13 +76,13 @@ async fn test_cancel_already_finished() {
 #[tokio::test]
 async fn test_cancel_self() {
     let ret = join_me_maybe! {
-        foo: definitely async {
+        foo: async {
             // This arm is cancelling itself, but it's going to exit anyway. Make sure we don't
             // screw up the count.
             foo.cancel();
             0
         },
-        definitely ready(1),
+        ready(1),
     };
     assert_eq!(ret, (Some(0), 1));
 }
@@ -91,7 +91,7 @@ async fn test_cancel_self() {
 async fn test_drop_promptly() {
     let mutex = tokio::sync::Mutex::new(());
     let ret = join_me_maybe! {
-        foo: definitely async {
+        foo: async {
             // Polling order is (currently) deterministic, so this arm definitely gets the lock
             // here. If that ever changes we could acquire the guard above and move it in here.
             let _guard = mutex.lock().await;
@@ -99,7 +99,7 @@ async fn test_drop_promptly() {
             // about that.
             sleep(Duration::from_secs(1_000_000)).await;
         },
-        definitely async {
+        async {
             // Take the lock from foo...by force!
             foo.cancel();
             // If cancelling `foo` doesn't drop its future promptly, this will deadlock.
@@ -118,7 +118,7 @@ async fn test_nontrivial_futures() {
             sleep(Duration::from_millis(1)).await;
             1
         },
-        definitely async {
+        async {
             sleep(Duration::from_millis(10)).await;
             2
         },

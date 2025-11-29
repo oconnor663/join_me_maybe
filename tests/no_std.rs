@@ -7,9 +7,9 @@ use join_me_maybe::join_me_maybe;
 
 pub async fn foo() {
     join_me_maybe! {
-        definitely ready(0),
+        ready(0),
         maybe ready(1),
-        cancel1: definitely ready(2),
+        cancel1: ready(2),
         cancel2: maybe async {
             cancel1.cancel();
             cancel2.cancel();
