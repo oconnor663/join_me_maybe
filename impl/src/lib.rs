@@ -87,54 +87,17 @@ impl ToTokens for JoinMeMaybe {
                 let #flag_name = ::core::sync::atomic::AtomicBool::new(false);
             });
             if let Some(label) = &self.arms[i].cancel_label {
-                let mut count_field = TokenStream2::new();
-                let mut count_field_initialize = TokenStream2::new();
-                let mut cancel_body = TokenStream2::new();
+                // This identifier will be in-scope for caller code in the arms.
                 if self.arms[i].is_definitely {
-                    count_field.extend(quote! {
-                        count: &'a ::core::sync::atomic::AtomicUsize,
-                    });
-                    count_field_initialize.extend(quote! {
-                        count: &#definitely_finished_count,
-                    });
-                    cancel_body.extend(quote! {
-                        // No need for atomic compare-exchange or fetch-add here. We're only using
-                        // atomics to avoid needing to write unsafe code. (Relaxed atomic loads and
-                        // stores are extremely cheap, often equal to regular ones.)
-                        use ::core::sync::atomic::Ordering::Relaxed;
-                        if !self.finished.load(Relaxed) {
-                            self.finished.store(true, Relaxed);
-                            // To keep this count accurate, we rely on each arm to mark itself
-                            // finished if it exits naturally. See below.
-                            self.count.store(self.count.load(Relaxed) + 1, Relaxed);
-                        }
+                    initializers.extend(quote! {
+                        let #label = join_me_maybe::Canceller::new_definitely(&#flag_name, &#definitely_finished_count);
                     });
                 } else {
-                    cancel_body.extend(quote! {
-                        // This is a `maybe` arm, so it doesn't matter if this flag gets set twice.
-                        // We don't count these.
-                        use ::core::sync::atomic::Ordering::Relaxed;
-                        self.finished.store(true, Relaxed);
+                    initializers.extend(quote! {
+                        // This identifier will be in-scope for caller code in the arms.
+                        let #label = join_me_maybe::Canceller::new_maybe(&#flag_name);
                     });
                 }
-                initializers.extend(quote! {
-                    // This identifier will be in-scope for caller code in the arms.
-                    let #label = {
-                        struct Canceller<'a> {
-                            finished: &'a ::core::sync::atomic::AtomicBool,
-                            #count_field
-                        };
-                        impl<'a> Canceller<'a> {
-                            fn cancel(&self) {
-                                #cancel_body
-                            }
-                        }
-                        Canceller {
-                            finished: &#flag_name,
-                            #count_field_initialize
-                        }
-                    };
-                });
             }
         }
 
