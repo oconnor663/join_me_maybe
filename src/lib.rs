@@ -72,12 +72,10 @@ impl ToTokens for JoinMeMaybe {
 
         // First define all the finished flags and cancellers. The finished flags get set to true
         // whenever an arm finishes naturally (poll returns Ready) *or* another atom cancels it.
-        let total_definitely_count = self.arms.iter().filter(|arm| arm.is_definitely).count();
-        let total_definitely_const = format_ident!("TOTAL_DEFINITELY", span = Span::mixed_site());
+        let total_definitely = self.arms.iter().filter(|arm| arm.is_definitely).count();
         let definitely_finished_count =
             format_ident!("definitely_finished_count", span = Span::mixed_site());
         initializers.extend(quote! {
-            const #total_definitely_const: usize = #total_definitely_count;
             let #definitely_finished_count = ::core::sync::atomic::AtomicUsize::new(0);
         });
         let finished_flag_names: Vec<_> = (0..self.arms.len())
@@ -181,7 +179,7 @@ impl ToTokens for JoinMeMaybe {
                         #mark_finished
                     }
                 }
-                if #definitely_finished_count.load(Relaxed) == #total_definitely_const {
+                if #definitely_finished_count.load(Relaxed) == #total_definitely {
                     break;
                 }
             });
