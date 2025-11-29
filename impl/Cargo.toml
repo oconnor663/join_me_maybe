@@ -1,0 +1,20 @@
+[package]
+name = "join_me_maybe_impl"
+version = "0.1.0"
+authors = ["Jack O'Connor <oconnor663@gmail.com>"]
+description = "internal proc macro crate for `join_me_maybe`"
+repository = "https://github.com/oconnor663/join_me_maybe"
+license = "Apache-2.0 OR MIT"
+documentation = "https://docs.rs/join_me_maybe"
+readme = "README.md"
+edition = "2024"
+
+[lib]
+proc-macro = true
+# needed for `cargo readme`
+path = "src/lib.rs"
+
+[dependencies]
+proc-macro2 = "1.0.103"
+quote = "1.0.42"
+syn = "2.0.110"
