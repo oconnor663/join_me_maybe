@@ -102,19 +102,19 @@ impl ToTokens for JoinMeMaybe {
         }
 
         // Now define all the arm futures, which will have the cancellers above in-scope.
-        let arm_names: Vec<_> = (0..self.arms.len())
+        let arm_futures: Vec<_> = (0..self.arms.len())
             .map(|i| format_ident!("arm_{i}", span = Span::mixed_site()))
             .collect();
-        for (arm, name) in self.arms.iter().zip(&arm_names) {
+        for (arm, arm_future) in self.arms.iter().zip(&arm_futures) {
             let body = &arm.body;
             initializers.extend(quote! {
-                let mut #name = ::core::pin::pin!(::join_me_maybe::maybe_done::maybe_done(#body));
+                let mut #arm_future = ::core::pin::pin!(::join_me_maybe::maybe_done::maybe_done(#body));
             });
         }
 
         let mut polling_and_counting = TokenStream2::new();
-        for ((arm, name), finished_flag) in
-            self.arms.iter().zip(&arm_names).zip(&finished_flag_names)
+        for ((arm, arm_future), finished_flag) in
+            self.arms.iter().zip(&arm_futures).zip(&finished_flag_names)
         {
             let mut mark_finished = TokenStream2::new();
             if arm.is_definitely {
@@ -138,7 +138,7 @@ impl ToTokens for JoinMeMaybe {
             }
             polling_and_counting.extend(quote! {
                 if !#finished_flag.load(Relaxed) {
-                    if Future::poll(#name.as_mut(), cx).is_ready() {
+                    if Future::poll(#arm_future.as_mut(), cx).is_ready() {
                         #mark_finished
                     }
                 }
@@ -148,10 +148,28 @@ impl ToTokens for JoinMeMaybe {
             });
         }
 
+        // When a future gets cancelled, that means two thing. First, the obvious one, it shouldn't
+        // ever get polled again. But second -- and it's easy to miss this part -- it needs to get
+        // *dropped promptly*. Consider a case where one arm is holding an async lock, and another
+        // arm is trying to acquire it. If the first arm is cancelled but not dropped, then the
+        // second arm will deadlock. See "Futurelock": https://rfd.shared.oxide.computer/rfd/0609.
+        let mut cancelling = TokenStream2::new();
+        for ((arm, arm_future), finished_flag) in
+            self.arms.iter().zip(&arm_futures).zip(&finished_flag_names)
+        {
+            if arm.cancel_label.is_some() {
+                cancelling.extend(quote! {
+                    if #finished_flag.load(Relaxed) {
+                        #arm_future.as_mut().cancel_if_pending();
+                    }
+                });
+            }
+        }
+
         let mut return_values = TokenStream2::new();
-        for name in &arm_names {
+        for arm_future in &arm_futures {
             return_values.extend(quote! {
-                #name.as_mut().take_output(),
+                #arm_future.as_mut().take_output(),
             });
         }
 
@@ -165,6 +183,9 @@ impl ToTokens for JoinMeMaybe {
                     // Not really a loop, just a way to short-circuit with `break`.
                     loop {
                         #polling_and_counting
+                        // Polling above might `break` and skip cancelling. That's fine, because
+                        // everything drops after we return `Ready`.
+                        #cancelling
                         // If we don't `break` during polling, we exit here.
                         return Poll::Pending;
                     }

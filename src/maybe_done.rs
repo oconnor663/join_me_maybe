@@ -1,4 +1,4 @@
-//! This file is vendored from the `futures` crate, with modifications.
+//! This file was originally copied from the `futures` crate.
 //!
 //! https://github.com/rust-lang/futures-rs/blob/de9274e655b2fff8c9630a259a473b71a6b79dda/futures-util/src/future/maybe_done.rs
 
@@ -38,6 +38,14 @@ impl<Fut: Future> MaybeDone<Fut> {
                 Self::Done(output) => Some(output),
                 _ => unreachable!(),
             }
+        }
+    }
+
+    /// When futures are cancelled, we need to drop them promptly. This method helps with that.
+    #[inline]
+    pub fn cancel_if_pending(mut self: Pin<&mut Self>) {
+        if matches!(*self, Self::Future(_)) {
+            self.set(Self::Gone);
         }
     }
 }
