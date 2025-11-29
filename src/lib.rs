@@ -196,7 +196,7 @@ impl ToTokens for JoinMeMaybe {
                     }
                 }
                 if #definitely_finished_count.load(Relaxed) == #total_definitely_const {
-                    return ::std::task::Poll::Ready((#return_values));
+                    return Poll::Ready((#return_values));
                 }
             });
         }
@@ -204,10 +204,10 @@ impl ToTokens for JoinMeMaybe {
         tokens.extend(quote! {
             {
                 #initializers
-                ::std::future::poll_fn(|#cx| {
+                ::core::future::poll_fn(|#cx| {
                     let mut #definitely_finished = true;
                     #polling_and_counting
-                    ::std::task::Poll::Pending
+                    Poll::Pending
                 }).await
             }
         });
