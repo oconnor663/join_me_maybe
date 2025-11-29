@@ -151,21 +151,7 @@ impl ToTokens for JoinMeMaybe {
             });
         }
 
-        let mut return_values = TokenStream2::new();
-        for name in &arm_names {
-            return_values.extend(quote! {
-                #name.as_mut().take_output(),
-            });
-        }
-
         let mut polling_and_counting = TokenStream2::new();
-        polling_and_counting.extend(quote! {
-            use ::core::sync::atomic::Ordering::Relaxed;
-            use ::core::future::Future;
-            use ::core::task::Poll;
-        });
-        let definitely_finished = format_ident!("definitely_finished", span = Span::mixed_site());
-        let cx = format_ident!("cx", span = Span::mixed_site());
         for ((arm, name), finished_flag) in
             self.arms.iter().zip(&arm_names).zip(&finished_flag_names)
         {
@@ -191,23 +177,38 @@ impl ToTokens for JoinMeMaybe {
             }
             polling_and_counting.extend(quote! {
                 if !#finished_flag.load(Relaxed) {
-                    if Future::poll(#name.as_mut(), #cx).is_ready() {
+                    if Future::poll(#name.as_mut(), cx).is_ready() {
                         #mark_finished
                     }
                 }
                 if #definitely_finished_count.load(Relaxed) == #total_definitely_const {
-                    return Poll::Ready((#return_values));
+                    break;
                 }
+            });
+        }
+
+        let mut return_values = TokenStream2::new();
+        for name in &arm_names {
+            return_values.extend(quote! {
+                #name.as_mut().take_output(),
             });
         }
 
         tokens.extend(quote! {
             {
                 #initializers
-                ::core::future::poll_fn(|#cx| {
-                    let mut #definitely_finished = true;
-                    #polling_and_counting
-                    Poll::Pending
+                ::core::future::poll_fn(|cx| {
+                    use ::core::sync::atomic::Ordering::Relaxed;
+                    use ::core::future::Future;
+                    use ::core::task::Poll;
+                    // Not really a loop, just a way to short-circuit with `break`.
+                    loop {
+                        #polling_and_counting
+                        // If we don't `break` during polling, we exit here.
+                        return Poll::Pending;
+                    }
+                    // If we `break` during polling, we exit here.
+                    Poll::Ready((#return_values))
                 }).await
             }
         });
