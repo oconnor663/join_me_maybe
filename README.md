@@ -97,6 +97,148 @@ doesn't work.
 `join_me_maybe!` is compatible with `#![no_std]`. It has no runtime dependencies and does not
 allocate.
 
+## What's wrong with `select!`-in-a-`loop`?
+
+Here are several different mistakes you can make with `select!`-in-a-`loop` that you don't have
+to worry about with `join_me_maybe!`.
+
+### Excessive cancellation
+
+In this example the author _intended_ to call `background_work` every second while processing
+messages from a channel. However, when messages are coming more than once a second,
+`background_work` never gets called at all, because the `sleep` future unintentionally gets
+cancelled and recreated every time through the loop:
+
+```rust
+loop {
+    select! {
+        message = receiver.recv() => {
+            if let Some(value) = message {
+                do_something(value);
+            } else {
+                break;
+            }
+        },
+        _ = sleep(Duration::from_secs(1)) => {
+            background_work();  // This might never run!
+        }
+    }
+}
+```
+
+Compare:
+
+```rust
+join_me_maybe!(
+    async {
+        while let Some(value) = receiver.recv().await {
+            do_something(value);
+        }
+    },
+    maybe async {
+        loop {
+            sleep(Duration::from_secs(1)).await;
+            background_work();
+        }
+    },
+);
+```
+
+### Serial arm bodies
+
+In this example the author _intended_ to process messages from two channels concurrently.
+However, whenever the first arm receives a message and sleeps, the second arm also sleeps,
+because the bodies of `select!` arms don't run concurrently:
+
+```rust
+loop {
+    select! {
+        Some(_) = receiver1.recv() => {
+            println!("1");
+            // Some expensive processing...
+            sleep(Duration::from_secs(1)).await;
+        },
+        Some(_) = receiver2.recv() => {
+            println!("2");  // The sleep above blocks this!
+        },
+        else => {
+            break;
+        }
+    }
+}
+```
+
+Compare (`join!` is sufficient here):
+
+```rust
+join!(
+    async {
+        while let Some(_) = receiver1.recv().await {
+            println!("1");
+            // Some expensive processing...
+            sleep(Duration::from_secs(1)).await;
+        }
+    },
+    async {
+        while let Some(_) = receiver2.recv().await {
+            println!("2");
+        }
+    },
+);
+```
+
+### Delayed `drop`
+
+To fix the excessive cancellation issue above, we often create futures outside the loop and
+`select!` on them by mutable reference. That creates a disconnect between when a future stops
+being polled and when it gets _dropped_, which can matter for releasing resources like lock
+guards.
+
+```rust
+let mutex = tokio::sync::Mutex::new(42);
+let mut slow_future = pin!(async {
+    let _guard = mutex.lock().await;
+    // Very slow! This is gonna get cancelled...
+    sleep(Duration::from_secs(1_000_000)).await;
+});
+loop {
+    select! {
+        _ = &mut slow_future => {}
+        _ = sleep(Duration::from_millis(100)) => {
+            if should_cancel() {
+                break;
+            }
+        },
+    }
+}
+// `slow_future` is no longer being polled, but it hasn't been dropped.
+let _guard = mutex.lock().await; // Deadlock!
+```
+
+Compare:
+
+```rust
+let mutex = tokio::sync::Mutex::new(42);
+join_me_maybe!(
+    slow_future: async {
+        let _guard = mutex.lock().await;
+        // Very slow! This is gonna get cancelled...
+        sleep(Duration::from_secs(1_000_000)).await;
+    },
+    async {
+        loop {
+            sleep(Duration::from_millis(100)).await;
+            if should_cancel() {
+                slow_future.cancel();
+                // `slow_future` gets dropped promptly. No risk of deadlock.
+                let _guard = mutex.lock().await;
+                break;
+            }
+        }
+    }
+);
+```
+
 [`futures::join!`]: https://docs.rs/futures/latest/futures/macro.join.html
 [`tokio::join!`]: https://docs.rs/tokio/latest/tokio/macro.join.html
 [`select!`]: https://tokio.rs/tokio/tutorial/select
