@@ -19,43 +19,78 @@ use tokio::time::{sleep, Duration};
 
 // Create a couple futures, one that's ready immediately, and another that takes some time.
 let future1 = std::future::ready(1);
-let future2 = async {
-    sleep(Duration::from_millis(10)).await;
-    2
-};
+let future2 = async { sleep(Duration::from_millis(100)).await; 2 };
 
-// Wait for both of them to finish.
+// Run them concurrently and wait for both of them to finish.
 let (a, b) = join_me_maybe!(future1, future2);
 assert_eq!((a, b), (1, 2));
 ```
 
-If you have a a future that you want to run concurrently, but you don't necessarily want to
-wait for it to finish, you can use the `maybe` keyword. This can be useful with timer loops
-that never actually finish. The outputs of `maybe` futures are wrapped in `Option`:
+(That's an example to get us started, but of course if `join!` is all you need, just use
+`join!`.)
+
+### `maybe` cancellation
+
+If you don't necessarily want to wait for all of your futures finish, you can use the `maybe`
+keyword. For example, this can be useful with infinite loops of background work that never
+actually exit. The outputs of `maybe` futures are wrapped in `Option`:
 
 ```rust
 let outputs = join_me_maybe!(
-    // This future isn't `maybe`, so we'll wait for it to finish.
-    async {
-        sleep(Duration::from_millis(100)).await;
-        1
-    },
-
+    // This future isn't `maybe`, so we'll definitely wait for it to finish.
+    async { sleep(Duration::from_millis(100)).await; 1 },
     // We won't necessarily wait for this `maybe` future, but in practice it'll finish before
-    // the "definitely" futures above, and we'll get its output.
-    maybe std::future::ready(2),
-
+    // the "definitely" future above, and we'll get its output.
+    maybe async { sleep(Duration::from_millis(10)).await; 2 },
     // This `maybe` future never finishes, and we'll cancel it when the first future is done.
     maybe async {
         loop {
+            // Some periodic work...
             sleep(Duration::from_millis(10)).await;
-            // some background work
         }
     },
 );
 assert_eq!(outputs, (1, Some(2), None));
 ```
 
+### `label:` and `.cancel()`
+
+It's also possible to cancel futures by name if you `label:` them. The outputs of these are
+also wrapped in `Option`:
+
+```rust
+let mutex = tokio::sync::Mutex::new(42);
+let outputs = join_me_maybe!(
+    // The `foo:` label here means all the future expressions here (including this one) have a
+    // `foo` object in scope, which provides a `.cancel()` method.
+    foo: async {
+        let _guard = mutex.lock().await;
+        // Selfishly hold the lock for a long time.
+        sleep(Duration::from_secs(1_000_000)).await;
+    },
+    async {
+        // Give `foo` a little bit of time...
+        sleep(Duration::from_millis(100)).await;
+        assert!(mutex.try_lock().is_err(), "foo still has the lock");
+        // Hmm, `foo` is taking way too long. Cancel it!
+        foo.cancel();
+        // Cancelling `foo` drops it promptly, so taking the lock won't block now.
+        *mutex.lock().await
+    },
+);
+assert_eq!(outputs, (None, 42));
+```
+
+Note that if a future cancels _itself_ in this way, its execution still continues as normal
+after `.cancel()` returns, up until the next `.await` point. (In an `async` block, it's usually
+cleaner to just `break` or `return`.) In any case, a `.cancel()`ed future won't be polled
+again, and it'll be dropped promptly, freeing any locks or other resources that it might be
+holding.
+
+### `no_std`
+
+`join_me_maybe!` works under `#![no_std]`. It has no runtime dependencies and does not
+allocate.
 
 [`futures::join!`]: https://docs.rs/futures/latest/futures/macro.join.html
 [`tokio::join!`]: https://docs.rs/tokio/latest/tokio/macro.join.html
