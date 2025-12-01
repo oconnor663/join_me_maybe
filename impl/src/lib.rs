@@ -67,8 +67,8 @@ impl ToTokens for JoinMeMaybe {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
         let mut initializers = TokenStream2::new();
 
-        // First define all the finished flags and cancellers. The finished flags get set to true
-        // whenever an arm finishes naturally (poll returns Ready) *or* another atom cancels it.
+        // First define the finished flags and cancellers. The finished flags get set to true
+        // whenever an arm finishes naturally (poll returns Ready) *or* another arm cancels it.
         let total_definitely = self.arms.iter().filter(|arm| arm.is_definitely).count();
         let definitely_finished_count =
             format_ident!("definitely_finished_count", span = Span::mixed_site());
@@ -78,23 +78,31 @@ impl ToTokens for JoinMeMaybe {
         let finished_flag_names: Vec<_> = (0..self.arms.len())
             .map(|i| format_ident!("arm_{i}_finished", span = Span::mixed_site()))
             .collect();
+        let canceller_internal_names: Vec<_> = (0..self.arms.len())
+            .map(|i| format_ident!("arm_{i}_canceller", span = Span::mixed_site()))
+            .collect();
         for i in 0..self.arms.len() {
-            let flag_name = &finished_flag_names[i];
-            initializers.extend(quote! {
-                let #flag_name = ::core::sync::atomic::AtomicBool::new(false);
-            });
             if let Some(label) = &self.arms[i].cancel_label {
-                // This identifier will be in-scope for caller code in the arms.
+                let flag_name = &finished_flag_names[i];
+                initializers.extend(quote! {
+                    let #flag_name = ::core::sync::atomic::AtomicBool::new(false);
+                });
+                // We use the "internal" name below, so that the caller gets an unused variable
+                // warning if they don't actually use this label themselves.
+                let canceller_internal_name = &canceller_internal_names[i];
                 if self.arms[i].is_definitely {
                     initializers.extend(quote! {
-                        let #label = join_me_maybe::Canceller::new_definitely(&#flag_name, &#definitely_finished_count);
+                        let #canceller_internal_name = join_me_maybe::Canceller::new_definitely(&#flag_name, &#definitely_finished_count);
                     });
                 } else {
                     initializers.extend(quote! {
-                        // This identifier will be in-scope for caller code in the arms.
-                        let #label = join_me_maybe::Canceller::new_maybe(&#flag_name);
+                        let #canceller_internal_name = join_me_maybe::Canceller::new_maybe(&#flag_name);
                     });
                 }
+                initializers.extend(quote! {
+                    // This is what's in-scope for callers.
+                    let #label = &#canceller_internal_name;
+                });
             }
         }
 
@@ -110,35 +118,45 @@ impl ToTokens for JoinMeMaybe {
         }
 
         let mut polling_and_counting = TokenStream2::new();
-        for ((arm, arm_future), finished_flag) in
-            self.arms.iter().zip(&arm_futures).zip(&finished_flag_names)
-        {
-            let mut mark_finished = TokenStream2::new();
-            if arm.is_definitely {
-                mark_finished.extend(quote! {
-                    // This `definitely` arm just exited naturally. Check again whether its
-                    // finished flag is already set (i.e. whether it pointlessly cancelled itself
-                    // right before exiting and already updated the finish count that way). If not,
-                    // update the finished count. As above, fetch-add isn't needed.
+        for i in 0..self.arms.len() {
+            let arm = &self.arms[i];
+            let arm_future = &arm_futures[i];
+            let finished_flag = &finished_flag_names[i];
+            let canceller_internal_name = &canceller_internal_names[i];
+            if arm.cancel_label.is_some() {
+                // If this is a "definitely" future, we need to bump the finished count after it
+                // exits, but we don't want to do that unconditionally. The future might've just
+                // cancelled itself right before exiting (pointlessly?) and already bumped the
+                // count. Calling `cancel` again has no effect on the output but keeps the count
+                // consistent.
+                polling_and_counting.extend(quote! {
                     if !#finished_flag.load(Relaxed) {
-                        #finished_flag.store(true, Relaxed);
-                        #definitely_finished_count.store(#definitely_finished_count.load(Relaxed) + 1, Relaxed);
+                        if Future::poll(#arm_future.as_mut(), cx).is_ready() {
+                            // Use the internal name here so that the caller still gets unused
+                            // variable warnings if they never refer to their label.
+                            #canceller_internal_name.cancel();
+                        }
+                    }
+                });
+            } else if arm.is_definitely {
+                // This "definitely" future can't be cancelled, so we can unconditionally bump the
+                // count when it exits.
+                polling_and_counting.extend(quote! {
+                    if #arm_future.is_future() {
+                        if Future::poll(#arm_future.as_mut(), cx).is_ready() {
+                            #definitely_finished_count.store(#definitely_finished_count.load(Relaxed) + 1, Relaxed);
+                        }
                     }
                 });
             } else {
-                // For `maybe` arms, just set `finished` so that we don't poll them again. As with
-                // the cancellers above, it doesn't matter if this gets set twice, because we're
-                // not counting these.
-                mark_finished.extend(quote! {
-                    #finished_flag.store(true, Relaxed);
+                // This is a `maybe` future without a finished/cancelled flag.
+                polling_and_counting.extend(quote! {
+                    if #arm_future.is_future() {
+                        _ = Future::poll(#arm_future.as_mut(), cx);
+                    }
                 });
             }
             polling_and_counting.extend(quote! {
-                if !#finished_flag.load(Relaxed) {
-                    if Future::poll(#arm_future.as_mut(), cx).is_ready() {
-                        #mark_finished
-                    }
-                }
                 if #definitely_finished_count.load(Relaxed) == #total_definitely {
                     break;
                 }
@@ -156,8 +174,8 @@ impl ToTokens for JoinMeMaybe {
         {
             if arm.cancel_label.is_some() {
                 cancelling.extend(quote! {
-                    if #finished_flag.load(Relaxed) {
-                        #arm_future.as_mut().cancel_if_pending();
+                    if #arm_future.is_future() && #finished_flag.load(Relaxed) {
+                        #arm_future.set(::join_me_maybe::maybe_done::MaybeDone::Gone);
                     }
                 });
             }

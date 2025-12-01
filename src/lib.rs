@@ -132,7 +132,7 @@ pub mod maybe_done;
 /// The type that provides the `.cancel()` method for labeled arguments
 pub struct Canceller<'a> {
     finished: &'a AtomicBool,
-    count: Option<&'a AtomicUsize>,
+    definitely_count: Option<&'a AtomicUsize>,
 }
 
 impl<'a> Canceller<'a> {
@@ -140,7 +140,7 @@ impl<'a> Canceller<'a> {
     pub fn new_definitely(finished: &'a AtomicBool, count: &'a AtomicUsize) -> Self {
         Self {
             finished,
-            count: Some(count),
+            definitely_count: Some(count),
         }
     }
 
@@ -148,7 +148,7 @@ impl<'a> Canceller<'a> {
     pub fn new_maybe(finished: &'a AtomicBool) -> Self {
         Self {
             finished,
-            count: None,
+            definitely_count: None,
         }
     }
 
@@ -157,15 +157,16 @@ impl<'a> Canceller<'a> {
     /// its execution continues after `.cancel()` returns until its next `.await` point. It's still
     /// possible for it to return a value. (In an `async` block it's less confusing to just
     /// `return` instead.)
+    #[inline]
     pub fn cancel(&self) {
         // No need for atomic compare-exchange or fetch-add here. We're only using atomics to avoid
         // needing to write unsafe code. (Relaxed atomic loads and stores are extremely cheap,
         // often equal to regular ones.)
         if !self.finished.load(Relaxed) {
             self.finished.store(true, Relaxed);
-            // To keep this count accurate, we rely on each arm to mark itself finished if it exits
-            // naturally. This is done in the macro.
-            if let Some(count) = &self.count {
+            // The macro calls this method after labeled futures exit naturally, so each definitely
+            // future bumps the count exactly once either way.
+            if let Some(count) = &self.definitely_count {
                 count.store(count.load(Relaxed) + 1, Relaxed);
             }
         }

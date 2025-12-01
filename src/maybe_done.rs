@@ -28,6 +28,11 @@ pub fn maybe_done<Fut: Future>(future: Fut) -> MaybeDone<Fut> {
 
 impl<Fut: Future> MaybeDone<Fut> {
     #[inline]
+    pub fn is_future(&self) -> bool {
+        matches!(*self, Self::Future(_))
+    }
+
+    #[inline]
     pub fn take_output(self: Pin<&mut Self>) -> Option<Fut::Output> {
         match &*self {
             Self::Done(_) => {}
@@ -38,14 +43,6 @@ impl<Fut: Future> MaybeDone<Fut> {
                 Self::Done(output) => Some(output),
                 _ => unreachable!(),
             }
-        }
-    }
-
-    /// When futures are cancelled, we need to drop them promptly. This method helps with that.
-    #[inline]
-    pub fn cancel_if_pending(mut self: Pin<&mut Self>) {
-        if matches!(*self, Self::Future(_)) {
-            self.set(Self::Gone);
         }
     }
 }
