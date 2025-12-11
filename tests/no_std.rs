@@ -12,7 +12,7 @@ pub async fn foo() {
         cancel1: ready(2),
         cancel2: maybe async {
             cancel1.cancel();
-            cancel2.cancel();
+            cancel2.cancel_self().await;
         }
     );
 }

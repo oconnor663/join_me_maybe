@@ -137,22 +137,6 @@ pub struct Canceller<'a> {
 }
 
 impl<'a> Canceller<'a> {
-    #[doc(hidden)]
-    pub fn new_definitely(finished: &'a AtomicBool, count: &'a AtomicUsize) -> Self {
-        Self {
-            finished,
-            definitely_count: Some(count),
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn new_maybe(finished: &'a AtomicBool) -> Self {
-        Self {
-            finished,
-            definitely_count: None,
-        }
-    }
-
     /// Cancel the corresponding labeled future. It won't be polled again, and it will be dropped
     /// promptly, though not directly within this function. Note that if a future cancels _itself_,
     /// its execution continues after `.cancel()` returns until its next `.await` point. It's still
@@ -171,5 +155,36 @@ impl<'a> Canceller<'a> {
                 count.store(count.load(Relaxed) + 1, Relaxed);
             }
         }
+    }
+}
+
+pub struct SelfCanceller<'a>(Canceller<'a>);
+
+impl<'a> SelfCanceller<'a> {
+    #[doc(hidden)]
+    pub fn _new_definitely(finished: &'a AtomicBool, count: &'a AtomicUsize) -> Self {
+        Self(Canceller {
+            finished,
+            definitely_count: Some(count),
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn _new_maybe(finished: &'a AtomicBool) -> Self {
+        Self(Canceller {
+            finished,
+            definitely_count: None,
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn _inner(&self) -> &Canceller<'a> {
+        &self.0
+    }
+
+    #[inline]
+    pub async fn cancel_self(&self) -> ! {
+        self.0.cancel();
+        core::future::pending().await
     }
 }

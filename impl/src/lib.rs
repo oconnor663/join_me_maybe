@@ -92,16 +92,16 @@ impl ToTokens for JoinMeMaybe {
                 let canceller_internal_name = &canceller_internal_names[i];
                 if self.arms[i].is_definitely {
                     initializers.extend(quote! {
-                        let #canceller_internal_name = join_me_maybe::Canceller::new_definitely(&#flag_name, &#definitely_finished_count);
+                        let #canceller_internal_name = ::join_me_maybe::SelfCanceller::_new_definitely(&#flag_name, &#definitely_finished_count);
                     });
                 } else {
                     initializers.extend(quote! {
-                        let #canceller_internal_name = join_me_maybe::Canceller::new_maybe(&#flag_name);
+                        let #canceller_internal_name = ::join_me_maybe::SelfCanceller::_new_maybe(&#flag_name);
                     });
                 }
                 initializers.extend(quote! {
-                    // This is what's in-scope for callers.
-                    let #label = &#canceller_internal_name;
+                    // This is the Canceller that's in-scope for all callers.
+                    let #label: &::join_me_maybe::Canceller = #canceller_internal_name._inner();
                 });
             }
         }
@@ -110,11 +110,27 @@ impl ToTokens for JoinMeMaybe {
         let arm_futures: Vec<_> = (0..self.arms.len())
             .map(|i| format_ident!("arm_{i}", span = Span::mixed_site()))
             .collect();
-        for (arm, arm_future) in self.arms.iter().zip(&arm_futures) {
+        for ((arm, arm_future), canceller_internal_name) in self
+            .arms
+            .iter()
+            .zip(&arm_futures)
+            .zip(&canceller_internal_names)
+        {
             let body = &arm.body;
-            initializers.extend(quote! {
-                let mut #arm_future = ::core::pin::pin!(::join_me_maybe::maybe_done::maybe_done(#body));
-            });
+            let initializer = if let Some(label) = &arm.cancel_label {
+                quote! {
+                    let mut #arm_future = ::core::pin::pin!(::join_me_maybe::maybe_done::maybe_done({
+                        // This shadows the Canceller with a SelfCanceller.
+                        let #label: &::join_me_maybe::SelfCanceller = &#canceller_internal_name;
+                        #body
+                    }));
+                }
+            } else {
+                quote! {
+                    let mut #arm_future = ::core::pin::pin!(::join_me_maybe::maybe_done::maybe_done(#body));
+                }
+            };
+            initializers.extend(initializer);
         }
 
         let mut polling_and_counting = TokenStream2::new();
@@ -134,7 +150,7 @@ impl ToTokens for JoinMeMaybe {
                         if Future::poll(#arm_future.as_mut(), cx).is_ready() {
                             // Use the internal name here so that the caller still gets unused
                             // variable warnings if they never refer to their label.
-                            #canceller_internal_name.cancel();
+                            #canceller_internal_name._inner().cancel();
                         }
                     }
                 });
