@@ -10,12 +10,28 @@ mod kw {
     syn::custom_keyword!(maybe);
 }
 
+enum JoinMeMaybeArmKind {
+    FutureOnly {
+        future: Expr,
+    },
+    FutureAndBody {
+        pattern: syn::Pat,
+        future: Expr,
+        body: Expr,
+    },
+    StreamAndBody {
+        pattern: syn::Pat,
+        stream: Expr,
+        body: Expr,
+    },
+}
+
 struct JoinMeMaybeArm {
     cancel_label: Option<Ident>,
     // "Definitely" is the opposite of "maybe". Previously there was a `definitely` keyword, but it
     // was unnecessarily verbose.
     is_maybe: bool,
-    body: Expr,
+    kind: JoinMeMaybeArmKind,
 }
 
 impl Parse for JoinMeMaybeArm {
@@ -33,11 +49,46 @@ impl Parse for JoinMeMaybeArm {
         } else {
             false
         };
-        let body = input.parse()?;
+        let mut is_future_and_body = false;
+        let mut is_stream_and_body = false;
+        let fork = input.fork();
+        if syn::Pat::parse_single(&fork).is_ok() {
+            if fork.peek(syn::Token![=]) {
+                is_future_and_body = true;
+            } else if fork.peek(syn::Token![in]) {
+                is_stream_and_body = true;
+            }
+        }
+        let kind = if is_future_and_body {
+            let pattern = syn::Pat::parse_single(input)?;
+            _ = input.parse::<syn::Token![=]>()?;
+            let future = input.parse()?;
+            _ = input.parse::<syn::Token![=>]>()?;
+            let body = input.parse()?;
+            JoinMeMaybeArmKind::FutureAndBody {
+                pattern,
+                future,
+                body,
+            }
+        } else if is_stream_and_body {
+            let pattern = syn::Pat::parse_single(input)?;
+            _ = input.parse::<syn::Token![in]>()?;
+            let stream = input.parse()?;
+            _ = input.parse::<syn::Token![=>]>()?;
+            let body = input.parse()?;
+            JoinMeMaybeArmKind::StreamAndBody {
+                pattern,
+                stream,
+                body,
+            }
+        } else {
+            let future = input.parse()?;
+            JoinMeMaybeArmKind::FutureOnly { future }
+        };
         Ok(Self {
             cancel_label,
             is_maybe,
-            body,
+            kind,
         })
     }
 }
@@ -111,10 +162,15 @@ impl ToTokens for JoinMeMaybe {
             .map(|i| format_ident!("arm_{i}", span = Span::mixed_site()))
             .collect();
         for (arm, arm_future) in self.arms.iter().zip(&arm_futures) {
-            let body = &arm.body;
-            initializers.extend(quote! {
-                let mut #arm_future = ::core::pin::pin!(::join_me_maybe::maybe_done::maybe_done(#body));
-            });
+            match &arm.kind {
+                JoinMeMaybeArmKind::FutureOnly { future }
+                | JoinMeMaybeArmKind::FutureAndBody { future, .. } => {
+                    initializers.extend(quote! {
+                        let mut #arm_future = ::core::pin::pin!(::join_me_maybe::maybe_done::maybe_done(#future));
+                    });
+                }
+                _ => unimplemented!(),
+            }
         }
 
         let mut polling_and_counting = TokenStream2::new();
