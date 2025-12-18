@@ -14,7 +14,7 @@ struct JoinMeMaybeArm {
     cancel_label: Option<Ident>,
     // "Definitely" is the opposite of "maybe". Previously there was a `definitely` keyword, but it
     // was unnecessarily verbose.
-    is_definitely: bool,
+    is_maybe: bool,
     body: Expr,
 }
 
@@ -36,7 +36,7 @@ impl Parse for JoinMeMaybeArm {
         let body = input.parse()?;
         Ok(Self {
             cancel_label,
-            is_definitely: !is_maybe,
+            is_maybe,
             body,
         })
     }
@@ -56,7 +56,7 @@ impl Parse for JoinMeMaybe {
                 let _ = input.parse::<syn::Token![,]>()?;
             }
         }
-        if !arms.iter().any(|arm| arm.is_definitely) {
+        if arms.iter().all(|arm| arm.is_maybe) {
             return Err(input.error("At least one arm must be `definitely`"));
         }
         Ok(Self { arms })
@@ -69,7 +69,7 @@ impl ToTokens for JoinMeMaybe {
 
         // First define the finished flags and cancellers. The finished flags get set to true
         // whenever an arm finishes naturally (poll returns Ready) *or* another arm cancels it.
-        let total_definitely = self.arms.iter().filter(|arm| arm.is_definitely).count();
+        let total_definitely = self.arms.iter().filter(|arm| !arm.is_maybe).count();
         let definitely_finished_count =
             format_ident!("definitely_finished_count", span = Span::mixed_site());
         initializers.extend(quote! {
@@ -90,13 +90,13 @@ impl ToTokens for JoinMeMaybe {
                 // We use the "internal" name below, so that the caller gets an unused variable
                 // warning if they don't actually use this label themselves.
                 let canceller_internal_name = &canceller_internal_names[i];
-                if self.arms[i].is_definitely {
+                if self.arms[i].is_maybe {
                     initializers.extend(quote! {
-                        let #canceller_internal_name = join_me_maybe::Canceller::new_definitely(&#flag_name, &#definitely_finished_count);
+                        let #canceller_internal_name = join_me_maybe::Canceller::new_maybe(&#flag_name);
                     });
                 } else {
                     initializers.extend(quote! {
-                        let #canceller_internal_name = join_me_maybe::Canceller::new_maybe(&#flag_name);
+                        let #canceller_internal_name = join_me_maybe::Canceller::new_definitely(&#flag_name, &#definitely_finished_count);
                     });
                 }
                 initializers.extend(quote! {
@@ -138,7 +138,14 @@ impl ToTokens for JoinMeMaybe {
                         }
                     }
                 });
-            } else if arm.is_definitely {
+            } else if arm.is_maybe {
+                // This is a `maybe` future without a finished/cancelled flag.
+                polling_and_counting.extend(quote! {
+                    if #arm_future.is_future() {
+                        _ = Future::poll(#arm_future.as_mut(), cx);
+                    }
+                });
+            } else {
                 // This "definitely" future can't be cancelled, so we can unconditionally bump the
                 // count when it exits.
                 polling_and_counting.extend(quote! {
@@ -146,13 +153,6 @@ impl ToTokens for JoinMeMaybe {
                         if Future::poll(#arm_future.as_mut(), cx).is_ready() {
                             #definitely_finished_count.store(#definitely_finished_count.load(Relaxed) + 1, Relaxed);
                         }
-                    }
-                });
-            } else {
-                // This is a `maybe` future without a finished/cancelled flag.
-                polling_and_counting.extend(quote! {
-                    if #arm_future.is_future() {
-                        _ = Future::poll(#arm_future.as_mut(), cx);
                     }
                 });
             }
@@ -183,7 +183,7 @@ impl ToTokens for JoinMeMaybe {
 
         let mut return_values = TokenStream2::new();
         for (arm, arm_future) in self.arms.iter().zip(&arm_futures) {
-            if !arm.is_definitely || arm.cancel_label.is_some() {
+            if arm.is_maybe || arm.cancel_label.is_some() {
                 // This arm is cancellable. Keep it wrapped in `Option`.
                 return_values.extend(quote! {
                     #arm_future.as_mut().take_output(),
