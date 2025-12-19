@@ -141,9 +141,7 @@ impl ToTokens for JoinMeMaybe {
             } else if arm.is_maybe {
                 // This is a `maybe` future without a finished/cancelled flag.
                 polling_and_counting.extend(quote! {
-                    if #arm_future.is_future() {
-                        _ = Future::poll(#arm_future.as_mut(), cx);
-                    }
+                    _ = Future::poll(#arm_future.as_mut(), cx);
                 });
             } else {
                 // This "definitely" future can't be cancelled, so we can unconditionally bump the
