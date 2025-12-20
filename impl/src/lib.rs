@@ -166,7 +166,7 @@ impl ToTokens for JoinMeMaybe {
                 JoinMeMaybeArmKind::FutureOnly { future }
                 | JoinMeMaybeArmKind::FutureAndBody { future, .. } => {
                     initializers.extend(quote! {
-                        let mut #arm_future = ::core::pin::pin!(::join_me_maybe::maybe_done::maybe_done(#future));
+                        let mut #arm_future = ::core::pin::pin!(::join_me_maybe::maybe_done::MaybeDone::Future(#future));
                     });
                 }
                 _ => unimplemented!(),
@@ -187,7 +187,7 @@ impl ToTokens for JoinMeMaybe {
                 // consistent.
                 polling_and_counting.extend(quote! {
                     if !#finished_flag.load(Relaxed) {
-                        if Future::poll(#arm_future.as_mut(), cx).is_ready() {
+                        if #arm_future.as_mut().poll_map(cx, |x| x).is_ready() {
                             // Use the internal name here so that the caller still gets unused
                             // variable warnings if they never refer to their label.
                             #canceller_internal_name.cancel();
@@ -197,14 +197,16 @@ impl ToTokens for JoinMeMaybe {
             } else if arm.is_maybe {
                 // This is a `maybe` future without a finished/cancelled flag.
                 polling_and_counting.extend(quote! {
-                    _ = Future::poll(#arm_future.as_mut(), cx);
+                    if #arm_future.is_future() {
+                        _ = #arm_future.as_mut().poll_map(cx, |x| x);
+                    }
                 });
             } else {
                 // This "definitely" future can't be cancelled, so we can unconditionally bump the
                 // count when it exits.
                 polling_and_counting.extend(quote! {
                     if #arm_future.is_future() {
-                        if Future::poll(#arm_future.as_mut(), cx).is_ready() {
+                        if #arm_future.as_mut().poll_map(cx, |x| x).is_ready() {
                             #definitely_finished_count.store(#definitely_finished_count.load(Relaxed) + 1, Relaxed);
                         }
                     }
@@ -255,8 +257,7 @@ impl ToTokens for JoinMeMaybe {
                 #initializers
                 ::core::future::poll_fn(|cx| {
                     use ::core::sync::atomic::Ordering::Relaxed;
-                    use ::core::future::Future;
-                    use ::core::task::Poll;
+                    use ::core::task::Poll::{Pending, Ready};
                     // Not really a loop, just a way to short-circuit with `break`.
                     loop {
                         #polling_and_counting
@@ -264,10 +265,10 @@ impl ToTokens for JoinMeMaybe {
                         // everything drops after we return `Ready`.
                         #cancelling
                         // If we don't `break` during polling, we exit here.
-                        return Poll::Pending;
+                        return Pending;
                     }
                     // If we `break` during polling, we exit here.
-                    Poll::Ready((#return_values))
+                    Ready((#return_values))
                 }).await
             }
         });

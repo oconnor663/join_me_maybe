@@ -1,4 +1,4 @@
-//! This file was originally copied from the `futures` crate.
+//! This module was originally copied from the `futures` crate, but it's been modified a lot.
 //!
 //! <https://github.com/rust-lang/futures-rs/blob/de9274e655b2fff8c9630a259a473b71a6b79dda/futures-util/src/future/maybe_done.rs>
 
@@ -7,33 +7,20 @@ use core::mem;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 
-/// A future that may have completed.
-///
-/// This is created by the [`maybe_done()`] function.
-pub enum MaybeDone<Fut: Future> {
-    /// A not-yet-completed future
+pub enum MaybeDone<Fut: Future, T> {
     Future(/* #[pin] */ Fut),
-    /// The output of the completed future
-    Done(Fut::Output),
-    /// The empty variant after the result of a [`MaybeDone`] has been
-    /// taken using the [`take_output`](MaybeDone::take_output) method.
+    Done(T),
     Gone,
 }
 
-impl<Fut: Future + Unpin> Unpin for MaybeDone<Fut> {}
-
-pub fn maybe_done<Fut: Future>(future: Fut) -> MaybeDone<Fut> {
-    MaybeDone::Future(future)
-}
-
-impl<Fut: Future> MaybeDone<Fut> {
+impl<Fut: Future, T> MaybeDone<Fut, T> {
     #[inline]
     pub fn is_future(&self) -> bool {
         matches!(*self, Self::Future(_))
     }
 
     #[inline]
-    pub fn take_output(self: Pin<&mut Self>) -> Option<Fut::Output> {
+    pub fn take_output(self: Pin<&mut Self>) -> Option<T> {
         match &*self {
             Self::Done(_) => {}
             Self::Future(_) | Self::Gone => return None,
@@ -41,28 +28,40 @@ impl<Fut: Future> MaybeDone<Fut> {
         unsafe {
             match mem::replace(self.get_unchecked_mut(), Self::Gone) {
                 Self::Done(output) => Some(output),
-                _ => unreachable!(),
+                _ => core::hint::unreachable_unchecked(),
             }
         }
     }
-}
 
-impl<Fut: Future> Future for MaybeDone<Fut> {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    // In the common case (`foo` below), `map` will be the identity function, but it can also be
+    // explicitly provided (`bar` below):
+    //
+    // ```
+    // join_me_maybe!(
+    //     foo(),
+    //     x = bar() => {
+    //         x + 1
+    //     }
+    //     ...
+    // );
+    // ```
+    #[inline]
+    pub fn poll_map(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        map: impl FnOnce(Fut::Output) -> T,
+    ) -> Poll<()> {
         unsafe {
             match self.as_mut().get_unchecked_mut() {
-                Self::Future(f) => {
-                    let Poll::Ready(res) = Pin::new_unchecked(f).poll(cx) else {
+                Self::Future(fut) => {
+                    let Poll::Ready(output) = Pin::new_unchecked(fut).poll(cx) else {
                         return Poll::Pending;
                     };
-                    self.set(Self::Done(res));
+                    self.set(Self::Done(map(output)));
+                    Poll::Ready(())
                 }
-                Self::Done(_) => {}
-                Self::Gone => panic!("MaybeDone polled after value taken"),
+                _ => panic!("MaybeDone polled again after completion"),
             }
         }
-        Poll::Ready(())
     }
 }
