@@ -136,10 +136,15 @@ async fn test_future_arms_with_bodies() {
             counter += 1;
             "hello"
         }
-        _ = ready(2) => counter += 1,
+        // The trailing comma is optional after these blocks.
+        y = ready(2) => {
+            counter += 1;
+            10 * y
+        },
+        _ = ready(3) => counter += 1,
         // This arm gets cancelled.
-        maybe _ = ready(3) => counter += 1,
+        maybe _ = ready(4) => counter += 1,
     );
-    assert_eq!(ret, (Some("hello"), (), None));
-    assert_eq!(counter, 2);
+    assert_eq!(ret, (Some("hello"), 20, (), None));
+    assert_eq!(counter, 3);
 }
