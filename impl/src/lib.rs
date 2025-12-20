@@ -102,9 +102,29 @@ impl Parse for JoinMeMaybe {
         let mut arms = Vec::new();
         while !input.is_empty() {
             let arm = input.parse::<JoinMeMaybeArm>()?;
+            // As with `match` statements, the trailing comma is optional if the arm ends with
+            // a block.
+            let trailing_comma_optional = matches!(
+                arm.kind,
+                JoinMeMaybeArmKind::FutureAndBody {
+                    body: Expr::Block(_),
+                    ..
+                } | JoinMeMaybeArmKind::StreamAndBody {
+                    body: Expr::Block(_),
+                    ..
+                }
+            );
             arms.push(arm);
             if !input.is_empty() {
-                let _ = input.parse::<syn::Token![,]>()?;
+                if trailing_comma_optional {
+                    // Parse an optional trailing comma if it's there.
+                    if input.peek(syn::Token![,]) {
+                        let _ = input.parse::<syn::Token![,]>()?;
+                    }
+                } else {
+                    // Parse a mandatory trailing comma.
+                    let _ = input.parse::<syn::Token![,]>()?;
+                }
             }
         }
         if arms.iter().all(|arm| arm.is_maybe) {
@@ -179,6 +199,15 @@ impl ToTokens for JoinMeMaybe {
             let arm_future = &arm_futures[i];
             let finished_flag = &finished_flag_names[i];
             let canceller_internal_name = &canceller_internal_names[i];
+            let poll_map = match &arm.kind {
+                JoinMeMaybeArmKind::FutureOnly { .. } => quote! {
+                    #arm_future.as_mut().poll_map(cx, |x| x)
+                },
+                JoinMeMaybeArmKind::FutureAndBody { pattern, body, .. } => quote! {
+                    #arm_future.as_mut().poll_map(cx, |#pattern| #body)
+                },
+                JoinMeMaybeArmKind::StreamAndBody { .. } => unimplemented!(),
+            };
             if arm.cancel_label.is_some() {
                 // If this is a "definitely" future, we need to bump the finished count after it
                 // exits, but we don't want to do that unconditionally. The future might've just
@@ -187,7 +216,7 @@ impl ToTokens for JoinMeMaybe {
                 // consistent.
                 polling_and_counting.extend(quote! {
                     if !#finished_flag.load(Relaxed) {
-                        if #arm_future.as_mut().poll_map(cx, |x| x).is_ready() {
+                        if #poll_map.is_ready() {
                             // Use the internal name here so that the caller still gets unused
                             // variable warnings if they never refer to their label.
                             #canceller_internal_name.cancel();
@@ -198,7 +227,7 @@ impl ToTokens for JoinMeMaybe {
                 // This is a `maybe` future without a finished/cancelled flag.
                 polling_and_counting.extend(quote! {
                     if #arm_future.is_future() {
-                        _ = #arm_future.as_mut().poll_map(cx, |x| x);
+                        _ = #poll_map;
                     }
                 });
             } else {
@@ -206,7 +235,7 @@ impl ToTokens for JoinMeMaybe {
                 // count when it exits.
                 polling_and_counting.extend(quote! {
                     if #arm_future.is_future() {
-                        if #arm_future.as_mut().poll_map(cx, |x| x).is_ready() {
+                        if #poll_map.is_ready() {
                             #definitely_finished_count.store(#definitely_finished_count.load(Relaxed) + 1, Relaxed);
                         }
                     }

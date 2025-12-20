@@ -125,3 +125,21 @@ async fn test_nontrivial_futures() {
     );
     assert_eq!(ret, (Some(1), 2));
 }
+
+#[tokio::test]
+async fn test_future_arms_with_bodies() {
+    let mut counter = 0;
+    // Note that all of the arm bodies here can mutate `counter`.
+    let ret = join_me_maybe!(
+        maybe x = ready(1) => {
+            assert_eq!(x, 1);
+            counter += 1;
+            "hello"
+        }
+        _ = ready(2) => counter += 1,
+        // This arm gets cancelled.
+        maybe _ = ready(3) => counter += 1,
+    );
+    assert_eq!(ret, (Some("hello"), (), None));
+    assert_eq!(counter, 2);
+}
