@@ -95,8 +95,7 @@ doesn't work.
 
 ### `no_std`
 
-`join_me_maybe!` is compatible with `#![no_std]`. It has no runtime dependencies and does not
-allocate.
+`join_me_maybe!` does not heap allocate and is compatible with `#![no_std]`.
 
 [`futures::join!`]: https://docs.rs/futures/latest/futures/macro.join.html
 [`tokio::join!`]: https://docs.rs/tokio/latest/tokio/macro.join.html

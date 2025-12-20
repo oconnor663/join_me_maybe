@@ -1,3 +1,4 @@
+use futures::stream;
 use join_me_maybe::join_me_maybe;
 use std::future::ready;
 use tokio::time::{Duration, sleep};
@@ -147,4 +148,26 @@ async fn test_future_arms_with_bodies() {
     );
     assert_eq!(ret, (Some("hello"), 20, (), None));
     assert_eq!(counter, 3);
+}
+
+#[tokio::test]
+async fn test_stream_arms() {
+    let mut elements1 = Vec::new();
+    let mut elements2 = Vec::new();
+    let mut counter = 0;
+    let ret = join_me_maybe!(
+        x in stream::iter(0..5) => {
+            elements1.push(x);
+            counter+= 1;
+        },
+        x in stream::iter(5..8) => {
+            elements2.push(x);
+            counter+= 1;
+        },
+        _ = ready(()) => counter += 100,
+    );
+    assert_eq!(elements1, [0, 1, 2, 3, 4]);
+    assert_eq!(elements2, [5, 6, 7]);
+    assert_eq!(counter, 108);
+    assert_eq!(ret, ((), (), ()));
 }

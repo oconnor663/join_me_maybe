@@ -178,35 +178,41 @@ impl ToTokens for JoinMeMaybe {
         }
 
         // Now define all the arm futures, which will have the cancellers above in-scope.
-        let arm_futures: Vec<_> = (0..self.arms.len())
+        let arm_futures_or_streams: Vec<_> = (0..self.arms.len())
             .map(|i| format_ident!("arm_{i}", span = Span::mixed_site()))
             .collect();
-        for (arm, arm_future) in self.arms.iter().zip(&arm_futures) {
+        for (arm, arm_future_or_stream) in self.arms.iter().zip(&arm_futures_or_streams) {
             match &arm.kind {
                 JoinMeMaybeArmKind::FutureOnly { future }
                 | JoinMeMaybeArmKind::FutureAndBody { future, .. } => {
                     initializers.extend(quote! {
-                        let mut #arm_future = ::core::pin::pin!(::join_me_maybe::maybe_done::MaybeDone::Future(#future));
+                        let mut #arm_future_or_stream = ::core::pin::pin!(::join_me_maybe::maybe_done::MaybeDone::Future(#future));
                     });
                 }
-                _ => unimplemented!(),
+                JoinMeMaybeArmKind::StreamAndBody { stream, .. } => {
+                    initializers.extend(quote! {
+                        let mut #arm_future_or_stream = ::core::pin::pin!(::join_me_maybe::maybe_done::MaybeDoneStream::Stream(#stream));
+                    });
+                }
             }
         }
 
         let mut polling_and_counting = TokenStream2::new();
         for i in 0..self.arms.len() {
             let arm = &self.arms[i];
-            let arm_future = &arm_futures[i];
+            let arm_future_or_stream = &arm_futures_or_streams[i];
             let finished_flag = &finished_flag_names[i];
             let canceller_internal_name = &canceller_internal_names[i];
             let poll_map = match &arm.kind {
                 JoinMeMaybeArmKind::FutureOnly { .. } => quote! {
-                    #arm_future.as_mut().poll_map(cx, |x| x)
+                    #arm_future_or_stream.as_mut().poll_map(cx, |x| x)
                 },
                 JoinMeMaybeArmKind::FutureAndBody { pattern, body, .. } => quote! {
-                    #arm_future.as_mut().poll_map(cx, |#pattern| #body)
+                    #arm_future_or_stream.as_mut().poll_map(cx, |#pattern| #body)
                 },
-                JoinMeMaybeArmKind::StreamAndBody { .. } => unimplemented!(),
+                JoinMeMaybeArmKind::StreamAndBody { pattern, body, .. } => quote! {
+                    #arm_future_or_stream.as_mut().poll_for_each(cx, |#pattern| #body)
+                },
             };
             if arm.cancel_label.is_some() {
                 // If this is a "definitely" future, we need to bump the finished count after it
@@ -226,7 +232,7 @@ impl ToTokens for JoinMeMaybe {
             } else if arm.is_maybe {
                 // This is a `maybe` future without a finished/cancelled flag.
                 polling_and_counting.extend(quote! {
-                    if #arm_future.is_future() {
+                    if !#arm_future_or_stream.is_finished() {
                         _ = #poll_map;
                     }
                 });
@@ -234,7 +240,7 @@ impl ToTokens for JoinMeMaybe {
                 // This "definitely" future can't be cancelled, so we can unconditionally bump the
                 // count when it exits.
                 polling_and_counting.extend(quote! {
-                    if #arm_future.is_future() {
+                    if !#arm_future_or_stream.is_finished() {
                         if #poll_map.is_ready() {
                             #definitely_finished_count.store(#definitely_finished_count.load(Relaxed) + 1, Relaxed);
                         }
@@ -254,30 +260,40 @@ impl ToTokens for JoinMeMaybe {
         // arm is trying to acquire it. If the first arm is cancelled but not dropped, then the
         // second arm will deadlock. See "Futurelock": https://rfd.shared.oxide.computer/rfd/0609.
         let mut cancelling = TokenStream2::new();
-        for ((arm, arm_future), finished_flag) in
-            self.arms.iter().zip(&arm_futures).zip(&finished_flag_names)
+        for ((arm, arm_future_or_stream), finished_flag) in self
+            .arms
+            .iter()
+            .zip(&arm_futures_or_streams)
+            .zip(&finished_flag_names)
         {
             if arm.cancel_label.is_some() {
                 cancelling.extend(quote! {
-                    if #arm_future.is_future() && #finished_flag.load(Relaxed) {
-                        #arm_future.set(::join_me_maybe::maybe_done::MaybeDone::Gone);
+                    if #finished_flag.load(Relaxed) {
+                        #arm_future_or_stream.as_mut().cancel_if_not_finished();
                     }
                 });
             }
         }
 
         let mut return_values = TokenStream2::new();
-        for (arm, arm_future) in self.arms.iter().zip(&arm_futures) {
-            if arm.is_maybe || arm.cancel_label.is_some() {
-                // This arm is cancellable. Keep it wrapped in `Option`.
-                return_values.extend(quote! {
-                    #arm_future.as_mut().take_output(),
-                });
-            } else {
-                // There's no way to cancel this arm without cancelling the whole macro. Unwrap it.
-                return_values.extend(quote! {
-                    #arm_future.as_mut().take_output().expect("this arm can't be cancelled"),
-                });
+        for (arm, arm_future_or_stream) in self.arms.iter().zip(&arm_futures_or_streams) {
+            match &arm.kind {
+                JoinMeMaybeArmKind::FutureOnly { .. }
+                | JoinMeMaybeArmKind::FutureAndBody { .. } => {
+                    if arm.is_maybe || arm.cancel_label.is_some() {
+                        // This arm is cancellable. Keep it wrapped in `Option`.
+                        return_values.extend(quote! {
+                            #arm_future_or_stream.as_mut().take_output(),
+                        });
+                    } else {
+                        // There's no way to cancel this arm without cancelling the whole macro. Unwrap it.
+                        return_values.extend(quote! {
+                            #arm_future_or_stream.as_mut().take_output().expect("this arm can't be cancelled"),
+                        });
+                    }
+                }
+                // Streams don't return anything.
+                JoinMeMaybeArmKind::StreamAndBody { .. } => return_values.extend(quote! { (), }),
             }
         }
 
