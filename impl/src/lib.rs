@@ -163,11 +163,16 @@ impl ToTokens for JoinMeMaybe {
                 let canceller_internal_name = &canceller_internal_names[i];
                 if self.arms[i].is_maybe {
                     initializers.extend(quote! {
-                        let #canceller_internal_name = join_me_maybe::Canceller::new_maybe(&#flag_name);
+                        let #canceller_internal_name = join_me_maybe::_impl::new_maybe_canceller(
+                            &#flag_name,
+                        );
                     });
                 } else {
                     initializers.extend(quote! {
-                        let #canceller_internal_name = join_me_maybe::Canceller::new_definitely(&#flag_name, &#definitely_finished_count);
+                        let #canceller_internal_name = join_me_maybe::_impl::new_definitely_canceller(
+                            &#flag_name,
+                            &#definitely_finished_count,
+                        );
                     });
                 }
                 initializers.extend(quote! {

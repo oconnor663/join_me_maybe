@@ -136,22 +136,6 @@ pub struct Canceller<'a> {
 }
 
 impl<'a> Canceller<'a> {
-    #[doc(hidden)]
-    pub fn new_definitely(finished: &'a AtomicBool, count: &'a AtomicUsize) -> Self {
-        Self {
-            finished,
-            definitely_count: Some(count),
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn new_maybe(finished: &'a AtomicBool) -> Self {
-        Self {
-            finished,
-            definitely_count: None,
-        }
-    }
-
     /// Cancel the corresponding labeled future. It won't be polled again, and it will be dropped
     /// promptly, though not directly within this function. Note that if a future cancels _itself_,
     /// its execution continues after `.cancel()` returns until its next `.await` point. It's still
@@ -169,6 +153,30 @@ impl<'a> Canceller<'a> {
             if let Some(count) = &self.definitely_count {
                 count.store(count.load(Relaxed) + 1, Relaxed);
             }
+        }
+    }
+}
+
+/// Functions that are only intended for use by the macro
+#[doc(hidden)]
+pub mod _impl {
+    use super::Canceller;
+    use core::sync::atomic::{AtomicBool, AtomicUsize};
+
+    pub fn new_definitely_canceller<'a>(
+        finished: &'a AtomicBool,
+        count: &'a AtomicUsize,
+    ) -> Canceller<'a> {
+        Canceller {
+            finished,
+            definitely_count: Some(count),
+        }
+    }
+
+    pub fn new_maybe_canceller<'a>(finished: &'a AtomicBool) -> Canceller<'a> {
+        Canceller {
+            finished,
+            definitely_count: None,
         }
     }
 }
