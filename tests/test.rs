@@ -207,16 +207,21 @@ impl<S: Stream> Stream for NeverEnding<S> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         let this = self.project();
-        // Save the waker every time the stream is polled, so that we can request a re-poll
-        // whenever it's mutated.
-        *this.waker = Some(cx.waker().clone());
 
         match this.stream.poll_next(cx) {
             // Refuse to allow the underlying stream to report that it's done. Of course this
             // causes us to poll the underlying stream again after it *tried* to report that it's
             // done, which isn't generally allowed, but `FuturesUnordered` expects it.
-            Poll::Ready(None) => Poll::Pending,
-            rest => rest,
+            Poll::Pending | Poll::Ready(None) => {
+                // Stash the waker so that we can request a re-poll if the inner stream is mutated.
+                *this.waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
+            Poll::Ready(Some(item)) => {
+                // Wakeups are not registered unless Pending is returned. Clear the waker.
+                *this.waker = None;
+                Poll::Ready(Some(item))
+            }
         }
     }
 }
