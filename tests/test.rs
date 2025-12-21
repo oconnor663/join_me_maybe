@@ -1,6 +1,10 @@
-use futures::stream;
+use futures::stream::FuturesUnordered;
+use futures::{Stream, StreamExt, stream};
 use join_me_maybe::join_me_maybe;
+use pin_project_lite::pin_project;
 use std::future::ready;
+use std::pin::Pin;
+use std::task::{Context, Poll, Waker};
 use tokio::time::{Duration, sleep};
 
 #[tokio::test]
@@ -170,4 +174,68 @@ async fn test_stream_arms() {
     assert_eq!(elements2, [5, 6, 7]);
     assert_eq!(counter, 108);
     assert_eq!(ret, ((), (), ()));
+}
+
+fn never_ending<S>(stream: S) -> NeverEnding<S> {
+    NeverEnding {
+        stream,
+        waker: None,
+    }
+}
+
+pin_project! {
+    struct NeverEnding<S> {
+        #[pin]
+        stream: S,
+        waker: Option<Waker>,
+    }
+}
+
+impl<S> NeverEnding<S> {
+    fn inner(self: Pin<&mut Self>) -> Pin<&mut S> {
+        let this = self.project();
+        if let Some(waker) = this.waker {
+            // Mutating the stream might mean it needs to be polled again.
+            waker.wake_by_ref();
+        }
+        this.stream
+    }
+}
+
+impl<S: Stream> Stream for NeverEnding<S> {
+    type Item = S::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+        // Save the waker every time the stream is polled, so that we can request a re-poll
+        // whenever it's mutated.
+        *this.waker = Some(cx.waker().clone());
+
+        match this.stream.poll_next(cx) {
+            // Refuse to allow the underlying stream to report that it's done. Of course this
+            // causes us to poll the underlying stream again after it *tried* to report that it's
+            // done, which isn't generally allowed, but `FuturesUnordered` expects it.
+            Poll::Ready(None) => Poll::Pending,
+            rest => rest,
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_canceller_mut_futuresunordered() {
+    let inputs = futures::stream::iter(0..5).then(|i| async move {
+        sleep(Duration::from_millis(1)).await;
+        i
+    });
+    let mut outputs = Vec::new();
+    join_me_maybe!(
+        i in inputs => {
+            unordered.inner().unwrap().inner().push(async move {
+                i
+            });
+        }
+        unordered: i in never_ending(FuturesUnordered::new()) => outputs.push(i),
+    );
+    outputs.sort();
+    assert_eq!(outputs, [0, 1, 2, 3, 4]);
 }
