@@ -281,7 +281,7 @@ impl ToTokens for JoinMeMaybe {
                 // This "definitely" future can't be cancelled, so we can unconditionally bump the
                 // count when it exits.
                 polling_and_counting.extend(quote! {
-                    if #poll_is_ready {
+                    if !#arm_name.is_done() && #poll_is_ready {
                         #definitely_finished_count.store(
                             #definitely_finished_count.load(::core::sync::atomic::Ordering::Relaxed) + 1,
                             ::core::sync::atomic::Ordering::Relaxed,

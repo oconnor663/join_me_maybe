@@ -3,9 +3,11 @@ use futures::{Stream, StreamExt, stream};
 use join_me_maybe::join_me_maybe;
 use pin_project_lite::pin_project;
 use std::future::ready;
+use std::hash::Hash;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 use tokio::time::{Duration, sleep};
+use tokio_stream::StreamMap;
 
 #[tokio::test]
 async fn test_maybe() {
@@ -243,4 +245,77 @@ async fn test_canceller_mut_futuresunordered() {
     );
     outputs.sort();
     assert_eq!(outputs, [0, 1, 2, 3, 4]);
+}
+
+// Similar to `NeverEnding` above, but more tailored to `StreamMap` specifically.
+struct WellBehavedStreamMap<K, V> {
+    map: StreamMap<K, V>,
+    waker: Option<Waker>,
+    drain: bool,
+}
+
+impl<K, V> WellBehavedStreamMap<K, V> {
+    fn new() -> Self {
+        Self {
+            map: StreamMap::new(),
+            waker: None,
+            drain: false,
+        }
+    }
+
+    fn start_drain(&mut self) {
+        self.drain = true;
+    }
+}
+
+impl<K: Hash + Eq, V: Stream> WellBehavedStreamMap<K, V> {
+    fn insert(&mut self, key: K, stream: V) {
+        assert!(!self.drain, "already draining");
+        self.map.insert(key, stream);
+        if let Some(waker) = &self.waker {
+            waker.wake_by_ref();
+        }
+    }
+}
+
+impl<K: Clone + Unpin, V: Stream + Unpin> Stream for WellBehavedStreamMap<K, V> {
+    type Item = (K, V::Item);
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.map).poll_next(cx) {
+            Poll::Ready(None) if self.drain => {
+                // Once drain is set, we can let the caller observe end-of-stream.
+                Poll::Ready(None)
+            }
+            Poll::Pending | Poll::Ready(None) => {
+                self.waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
+            Poll::Ready(Some(item)) => {
+                self.waker = None;
+                Poll::Ready(Some(item))
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_canceller_mut_streammap() {
+    let inputs =
+        tokio_stream::StreamNotifyClose::new(futures::stream::iter(0..5).then(|i| async move {
+            sleep(Duration::from_millis(1)).await;
+            i
+        }));
+    let mut outputs = Vec::new();
+    join_me_maybe!(
+        input in inputs => {
+            match input {
+                Some(i) => stream_map.inner().unwrap().insert(i, futures::stream::iter(vec![i; i])),
+                None => stream_map.inner().unwrap().start_drain(),
+            }
+        }
+        stream_map: (_k, v) in WellBehavedStreamMap::new() => outputs.push(v),
+    );
+    outputs.sort();
+    assert_eq!(outputs, [1, 2, 2, 3, 3, 3, 4, 4, 4, 4]);
 }

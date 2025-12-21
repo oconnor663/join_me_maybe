@@ -228,6 +228,10 @@ pub mod _impl {
     }
 
     impl<Fut> FuseFuture<Fut> {
+        pub fn is_done(&self) -> bool {
+            self.inner.is_none()
+        }
+
         pub fn get_pin_mut(self: Pin<&mut Self>) -> Option<Pin<&mut Fut>> {
             self.project().inner.as_pin_mut()
         }
@@ -268,6 +272,10 @@ pub mod _impl {
     }
 
     impl<S> FuseStream<S> {
+        pub fn is_done(&self) -> bool {
+            self.inner.is_none()
+        }
+
         pub fn get_pin_mut(self: Pin<&mut Self>) -> Option<Pin<&mut S>> {
             self.project().inner.as_pin_mut()
         }
