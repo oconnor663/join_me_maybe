@@ -178,22 +178,24 @@ async fn test_stream_arms() {
     assert_eq!(ret, ((), (), ()));
 }
 
-fn never_ending<S>(stream: S) -> NeverEnding<S> {
-    NeverEnding {
+fn resuming<S>(stream: S) -> ResumingStream<S> {
+    ResumingStream {
         stream,
         waker: None,
+        ended: false,
     }
 }
 
 pin_project! {
-    struct NeverEnding<S> {
+    struct ResumingStream<S> {
         #[pin]
         stream: S,
         waker: Option<Waker>,
+        ended: bool,
     }
 }
 
-impl<S> NeverEnding<S> {
+impl<S> ResumingStream<S> {
     fn inner(self: Pin<&mut Self>) -> Pin<&mut S> {
         let this = self.project();
         if let Some(waker) = this.waker {
@@ -202,18 +204,25 @@ impl<S> NeverEnding<S> {
         }
         this.stream
     }
+
+    fn end(&mut self) {
+        self.ended = true;
+    }
 }
 
-impl<S: Stream> Stream for NeverEnding<S> {
+impl<S: Stream> Stream for ResumingStream<S> {
     type Item = S::Item;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         let this = self.project();
 
         match this.stream.poll_next(cx) {
-            // Refuse to allow the underlying stream to report that it's done. Of course this
-            // causes us to poll the underlying stream again after it *tried* to report that it's
-            // done, which isn't generally allowed, but `FuturesUnordered` expects it.
+            // Once `self.ended` is set, we can let the caller observe end-of-stream.
+            Poll::Ready(None) if *this.ended => Poll::Ready(None),
+            // If not `self.ended`, refuse to allow the underlying stream to report that it's done.
+            // Of course this causes us to poll the underlying stream again after it *tried* to
+            // report that it's done, which isn't generally allowed, but `FuturesUnordered` expects
+            // it.
             Poll::Pending | Poll::Ready(None) => {
                 // Stash the waker so that we can request a re-poll if the inner stream is mutated.
                 *this.waker = Some(cx.waker().clone());
@@ -240,14 +249,14 @@ async fn test_canceller_mut_futuresunordered() {
             unordered.inner().unwrap().inner().push(async move {
                 i
             });
-        }
-        unordered: i in never_ending(FuturesUnordered::new()) => outputs.push(i),
+        } finally unordered.inner().unwrap().end(),
+        unordered: i in resuming(FuturesUnordered::new()) => outputs.push(i),
     );
     outputs.sort();
     assert_eq!(outputs, [0, 1, 2, 3, 4]);
 }
 
-// Similar to `NeverEnding` above, but more tailored to `StreamMap` specifically.
+// Similar to `ResumingStream` above, but more tailored to `StreamMap` specifically.
 struct WellBehavedStreamMap<K, V> {
     map: StreamMap<K, V>,
     waker: Option<Waker>,
