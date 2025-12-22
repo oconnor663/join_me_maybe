@@ -1,13 +1,13 @@
 # `join_me_maybe!` [![crates.io](https://img.shields.io/crates/v/join_me_maybe.svg)](https://crates.io/crates/join_me_maybe) [![docs.rs](https://docs.rs/join_me_maybe/badge.svg)](https://docs.rs/join_me_maybe)
 
 `join_me_maybe!` is an expanded version of the [`futures::join!`]/[`tokio::join!`] macro, with
-some added features for cancellation and early exit. Programs that need this sort of thing
-often resort to "[`select!`] in a loop" and/or "`select!` by reference", but those come with a
-notoriously long list of footguns.[\[1\]][cancelling_async][\[2\]][rfd400][\[3\]][rfd609] The
-goal of `join_me_maybe!` is to be more convenient and less error-prone than `select!` in some
-(not all) of its most common applications. The stretch goal is to make the case that
-`select!`-by-reference in particular isn't usually necessary and should be _considered
-harmful_.
+several added features for cancellation, early exit, and mutable access to the enclosing scope.
+Programs that need this sort of control flow often resort to "[`select!`] in a loop" and/or
+"`select!` by reference", but those come with a notoriously long list of
+footguns.[\[1\]][cancelling_async][\[2\]][rfd400][\[3\]][rfd609] The goal of `join_me_maybe!`
+is to be more convenient and less error-prone than `select!` in its most common applications.
+The stretch goal is to make the case that `select!`-by-reference in particular isn't usually
+necessary and should be _considered harmful_.
 
 ## Examples
 
@@ -93,9 +93,53 @@ execution still continues as normal after `.cancel()` returns, up until the next
 point. This can be useful in closure bodies or nested `async` blocks, where `return` or `break`
 doesn't work.
 
+### "finish expressions": `<pattern> = <future> => <body>`
+
+One of the most powerful properties of `select!` is that its arms get exclusive mutable access
+to the enclosing scope when they run. `join_me_maybe!` futures run concurrently and can't
+mutate shared variables (without a `Mutex` or some other source of "interior mutability"). To
+close this cap, `join_me_maybe!` supports an expanded, select-like syntax:
+
+```rust
+let mut counter = 0;
+join_me_maybe!(
+    _ = sleep(Duration::from_millis(1)) => counter += 1,
+    n = async {
+        sleep(Duration::from_millis(1)).await;
+        1
+    } => counter += n,
+);
+assert_eq!(counter, 2);
+```
+
+In order to give these "finish expressions" mutable access to the enclosing scope, without
+"snoozing" any of the other concurrent futures, these expressions run in a _synchronous
+context_ (i.e. they cannot `.await`). This makes them similar to [`FutureExt::map`] (as opposed
+to [`FutureExt::then`]). However, note that trying to accomplish the same thing with `map` (or
+`then`) doesn't compile:
+
+```compile_fail
+# #[tokio::main]
+# async fn main() {
+# use join_me_maybe::join_me_maybe;
+# use tokio::time::{sleep, Duration};
+# use futures::FutureExt;
+let mut counter = 0;
+join_me_maybe!(
+    sleep(Duration::from_millis(1)).map(|_| counter += 1),
+    //                                      ------- first mutable borrow
+    async {
+        sleep(Duration::from_millis(1)).await;
+        1
+    }.map(|n| counter += n),
+    //        ------- second mutable borrow
+);
+# }
+```
+
 ### `no_std`
 
-`join_me_maybe!` does not heap allocate and is compatible with `#![no_std]`.
+`join_me_maybe!` doesn't heap allocate and is compatible with `#![no_std]`.
 
 [`futures::join!`]: https://docs.rs/futures/latest/futures/macro.join.html
 [`tokio::join!`]: https://docs.rs/tokio/latest/tokio/macro.join.html
@@ -103,3 +147,5 @@ doesn't work.
 [cancelling_async]: https://sunshowers.io/posts/cancelling-async-rust/
 [rfd400]: https://rfd.shared.oxide.computer/rfd/400
 [rfd609]: https://rfd.shared.oxide.computer/rfd/609
+[`FutureExt::map`]: https://docs.rs/futures/latest/futures/future/trait.FutureExt.html#method.map
+[`FutureExt::then`]: https://docs.rs/futures/latest/futures/future/trait.FutureExt.html#method.then
