@@ -9,7 +9,7 @@ is to be more convenient and less error-prone than `select!` in its most common 
 The stretch goal is to make the case that `select!`-by-reference in particular isn't usually
 necessary and should be _considered harmful_.
 
-## Examples
+## Features and examples
 
 The basic use case works like `join!`, polling each of its arguments to completion and
 returning their outputs in a tuple.
@@ -95,10 +95,9 @@ doesn't work.
 
 ### "finish expressions": `<pattern> = <future> => <body>`
 
-One of the most powerful properties of `select!` is that its arms get exclusive mutable access
-to the enclosing scope when they run. `join_me_maybe!` futures run concurrently and can't
-mutate shared variables (without a `Mutex` or some other source of "interior mutability"). To
-close this cap, `join_me_maybe!` supports an expanded, select-like syntax:
+One of the powerful features of `select!` is that its arm bodies (though not its "scrutinees")
+get exclusive mutable access to the enclosing scope. `join_me_maybe!` supports an expanded `=>`
+syntax that works similarly:
 
 ```rust
 let mut counter = 0;
@@ -139,12 +138,13 @@ join_me_maybe!(
 
 ### streams
 
-Similar to the select-like `=>` syntax for futures above, you can also drive a stream, using
-`<pattern> in <stream> => ...` instead of `<pattern> = <future> => ...`. The following
-expression executes for each item in the stream. You can optionally follow that with the
-`finally` keyword and another expression that executes once after the stream is finished (if
-it's not cancelled). Both of these expressions get mutable access to the environment (and
-cannot `.await`). Here's an example of driving a stream together with `label:`/`.cancel()`:
+Similar to the `=>` syntax for futures above, you can also drive a stream, using `<pattern> in
+<stream>` instead of `<pattern> = <future>`. In this case the following expression executes for
+each item in the stream. You can optionally follow that with the `finally` keyword and another
+expression that executes after the stream is finished (if it's not cancelled). Both of these
+expressions get mutable access to the environment (and cannot `.await`). Here's an example of
+driving a stream, together with `label:`/`.cancel()`, which works with streams like it does
+with futures:
 
 ```rust
 use futures::stream::{self, StreamExt};
@@ -154,10 +154,10 @@ join_me_maybe!(
     my_stream: _ in stream::iter(0..5).then(async |_| {
         sleep(Duration::from_millis(10)).await
     }) => {
-        // This stream get cancelled, so this only executes three times.
+        // This stream gets cancelled below, so this only executes three times.
         counter += 1;
     } finally {
-        // This stream get cancelled, so this will never execute.
+        // This stream gets cancelled below, so this will never execute.
         counter += 1_000_000;
     },
     async {
@@ -168,6 +168,39 @@ join_me_maybe!(
 );
 assert_eq!(counter, 3);
 ```
+
+### mutable access to futures and streams
+
+This feature is even more experimental than everything else above. In synchronous expressions
+with mutable access to the calling scope (those after `=>` and `finally`), `label:` cancellers
+support an additional method: `.as_pin_mut()`. This returns an `Option<Pin<&mut T>>` pointing
+to the corresponding future or stream. (Or `None` if it's already completed/cancelled.) You can
+use this to mutate e.g. a [`FuturesUnordered`] or a [`StreamMap`] to add more work to it while
+it's being polled. (Not literally while it's being polled, but while it's owned by
+`join_me_maybe!` and guaranteed not to be "snoozed".) This is intended as an alternative to
+patterns that await futures *by reference*, which tends to be prone to "snoozing" mistakes.
+
+Unfortunately, streams that you can add work to dynamically are usually "poorly behaved" in the
+sense that they often return `Ready(None)` for a while, until more work is eventually added and
+they start returning `Ready(Some(_))` again. This is at odds with the [usual rule] that you
+shouldn't poll a stream again after it returns `Ready(Some)`, but it does work with
+`select!`-in-a-loop. (In Tokio it requires an `if` guard, and with `futures::select!` it leans
+on the "fused" requirement.) However, it does _not_ naturally work with `join_me_maybe!`, which
+interprets `Ready(None)` as "end of stream" and promptly drops the whole stream. ([Like it's
+supposed to!][usual rule]) For a stream to work well with this feature, it needs to do two
+things that as far as I know none of the dynamic streams currently do:
+
+1. The stream should only ever return `Ready(Some(_))` or `Pending`, until you somehow inform
+   it that no more work is coming, using say a `.close()` method or something. After that the
+   stream should probably drain its remaining work before returning `Ready(None)`. (If the
+   caller doesn't to wait for remaining work, they can cancel the stream instead.)
+2. Because adding more work might unblock callers that previously received `Pending`, the
+   stream should stash a `Waker` and invoke it whenever work is added.
+
+Adapting a stream that doesn't behave this way is complicated and not obviously a good idea.
+[See `tests/test.rs` for some examples.][adapter] Manually tracking `Waker`s is exactly the
+sort of error-prone business that this crate wants to _discourage_, and this whole feature will
+need a lot of baking before I can recommend it.
 
 ### `no_std`
 
@@ -183,3 +216,7 @@ assert_eq!(counter, 3);
 [`FutureExt::then`]: https://docs.rs/futures/latest/futures/future/trait.FutureExt.html#method.then
 [`AsyncIterator`]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html
 [`futures::stream`]: https://docs.rs/futures/latest/futures/stream/
+[`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
+[`StreamMap`]: https://docs.rs/tokio-stream/latest/tokio_stream/struct.StreamMap.html
+[usual rule]: https://docs.rs/futures/latest/futures/stream/trait.Stream.html#tymethod.poll_next
+[adapter]: https://github.com/oconnor663/join_me_maybe/blob/672c615cd586140e09052a83795ccc291c0a31c8/tests/test.rs#L180-L327

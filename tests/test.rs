@@ -245,10 +245,10 @@ async fn test_canceller_mut_futuresunordered() {
     let mut outputs = Vec::new();
     join_me_maybe!(
         i in inputs => {
-            unordered.inner().unwrap().inner().push(async move {
+            unordered.as_pin_mut().unwrap().inner().push(async move {
                 i
             });
-        } finally unordered.inner().unwrap().end(),
+        } finally unordered.as_pin_mut().unwrap().end(),
         unordered: i in resuming(FuturesUnordered::new()) => outputs.push(i),
     );
     outputs.sort();
@@ -316,9 +316,9 @@ async fn test_canceller_mut_streammap() {
     let mut outputs = Vec::new();
     join_me_maybe!(
         i in inputs => {
-            stream_map.inner().unwrap().insert(i, futures::stream::iter(vec![i; i]));
+            stream_map.as_pin_mut().unwrap().insert(i, futures::stream::iter(vec![i; i]));
         } finally {
-            stream_map.inner().unwrap().start_drain();
+            stream_map.as_pin_mut().unwrap().start_drain();
         },
         stream_map: (_k, v) in WellBehavedStreamMap::new() => outputs.push(v),
     );
