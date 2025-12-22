@@ -8,6 +8,7 @@ use syn::{
 
 mod kw {
     syn::custom_keyword!(maybe);
+    syn::custom_keyword!(finally);
 }
 
 enum JoinMeMaybeArmKind {
@@ -23,6 +24,7 @@ enum JoinMeMaybeArmKind {
         pattern: syn::Pat,
         stream: Expr,
         body: Expr,
+        finally: Option<Expr>,
     },
 }
 
@@ -76,10 +78,17 @@ impl Parse for JoinMeMaybeArm {
             let stream = input.parse()?;
             _ = input.parse::<syn::Token![=>]>()?;
             let body = input.parse()?;
+            let finally = if input.peek(kw::finally) {
+                _ = input.parse::<kw::finally>()?;
+                Some(input.parse()?)
+            } else {
+                None
+            };
             JoinMeMaybeArmKind::StreamAndBody {
                 pattern,
                 stream,
                 body,
+                finally,
             }
         } else {
             let future = input.parse()?;
@@ -111,6 +120,10 @@ impl Parse for JoinMeMaybe {
                     ..
                 } | JoinMeMaybeArmKind::StreamAndBody {
                     body: Expr::Block(_),
+                    finally: None,
+                    ..
+                } | JoinMeMaybeArmKind::StreamAndBody {
+                    finally: Some(Expr::Block(_)),
                     ..
                 }
             );
@@ -191,10 +204,17 @@ impl ToTokens for JoinMeMaybe {
                         let mut #arm_output = ::core::option::Option::None;
                     });
                 }
-                JoinMeMaybeArmKind::StreamAndBody { stream, .. } => {
+                JoinMeMaybeArmKind::StreamAndBody {
+                    stream, finally, ..
+                } => {
                     initializers.extend(quote! {
                         let mut #arm_name = ::core::pin::pin!(::join_me_maybe::_impl::fuse_stream(#stream));
                     });
+                    if finally.is_some() {
+                        initializers.extend(quote! {
+                            let mut #arm_output = ::core::option::Option::None;
+                        });
+                    }
                 }
             }
         }
@@ -244,20 +264,40 @@ impl ToTokens for JoinMeMaybe {
                         ::core::task::Poll::Pending => false,
                     }
                 },
-                JoinMeMaybeArmKind::StreamAndBody { pattern, body, .. } => quote! {
-                    loop {
-                        match ::futures::Stream::poll_next(#arm_name.as_mut(), cx) {
-                            ::core::task::Poll::Ready(::core::option::Option::Some(#poll_output)) => {
-                                (|#pattern| {
-                                    #cancellermuts
-                                    #body
-                                })(#poll_output);
+                JoinMeMaybeArmKind::StreamAndBody {
+                    pattern,
+                    body,
+                    finally,
+                    ..
+                } => {
+                    let finally = if let Some(finally) = finally {
+                        quote! {
+                            #arm_output = ::core::option::Option::Some((|| {
+                                #cancellermuts
+                                #finally
+                            })());
+                        }
+                    } else {
+                        quote! {}
+                    };
+                    quote! {
+                        loop {
+                            match ::futures::Stream::poll_next(#arm_name.as_mut(), cx) {
+                                ::core::task::Poll::Ready(::core::option::Option::Some(#poll_output)) => {
+                                    (|#pattern| {
+                                        #cancellermuts
+                                        #body
+                                    })(#poll_output);
+                                }
+                                ::core::task::Poll::Ready(::core::option::Option::None) => {
+                                    #finally
+                                    break true;
+                                }
+                                ::core::task::Poll::Pending => break false,
                             }
-                            ::core::task::Poll::Ready(::core::option::Option::None) => break true,
-                            ::core::task::Poll::Pending => break false,
                         }
                     }
-                },
+                }
             };
             if let Some(label) = &arm.cancel_label {
                 // If this is a "definitely" future/stream, we need to bump the finished count

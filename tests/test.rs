@@ -301,18 +301,16 @@ impl<K: Clone + Unpin, V: Stream + Unpin> Stream for WellBehavedStreamMap<K, V> 
 
 #[tokio::test]
 async fn test_canceller_mut_streammap() {
-    let inputs =
-        tokio_stream::StreamNotifyClose::new(futures::stream::iter(0..5).then(|i| async move {
-            sleep(Duration::from_millis(1)).await;
-            i
-        }));
+    let inputs = futures::stream::iter(0..5).then(|i| async move {
+        sleep(Duration::from_millis(1)).await;
+        i
+    });
     let mut outputs = Vec::new();
     join_me_maybe!(
-        input in inputs => {
-            match input {
-                Some(i) => stream_map.inner().unwrap().insert(i, futures::stream::iter(vec![i; i])),
-                None => stream_map.inner().unwrap().start_drain(),
-            }
+        i in inputs => {
+            stream_map.inner().unwrap().insert(i, futures::stream::iter(vec![i; i]));
+        } finally {
+            stream_map.inner().unwrap().start_drain();
         }
         stream_map: (_k, v) in WellBehavedStreamMap::new() => outputs.push(v),
     );
