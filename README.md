@@ -137,6 +137,38 @@ join_me_maybe!(
 # }
 ```
 
+### streams
+
+Similar to the select-like `=>` syntax for futures above, you can also drive a stream, using
+`<pattern> in <stream> => ...` instead of `<pattern> = <future> => ...`. The following
+expression executes for each item in the stream. You can optionally follow that with the
+`finally` keyword and another expression that executes once after the stream is finished (if
+it's not cancelled). Both of these expressions get mutable access to the environment (and
+cannot `.await`). Here's an example of driving a stream together with `label:`/`.cancel()`:
+
+```rust
+use futures::stream::{self, StreamExt};
+
+let mut counter = 0;
+join_me_maybe!(
+    my_stream: _ in stream::iter(0..5).then(async |_| {
+        sleep(Duration::from_millis(10)).await
+    }) => {
+        // This stream get cancelled, so this only executes three times.
+        counter += 1;
+    } finally {
+        // This stream get cancelled, so this will never execute.
+        counter += 1_000_000;
+    },
+    async {
+        // Wait long enough for the stream to yield three items, then cancel it.
+        sleep(Duration::from_millis(35)).await;
+        my_stream.cancel();
+    },
+);
+assert_eq!(counter, 3);
+```
+
 ### `no_std`
 
 `join_me_maybe!` doesn't heap allocate and is compatible with `#![no_std]`.
@@ -149,3 +181,5 @@ join_me_maybe!(
 [rfd609]: https://rfd.shared.oxide.computer/rfd/609
 [`FutureExt::map`]: https://docs.rs/futures/latest/futures/future/trait.FutureExt.html#method.map
 [`FutureExt::then`]: https://docs.rs/futures/latest/futures/future/trait.FutureExt.html#method.then
+[`AsyncIterator`]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html
+[`futures::stream`]: https://docs.rs/futures/latest/futures/stream/
