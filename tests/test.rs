@@ -142,8 +142,7 @@ async fn test_future_arms_with_bodies() {
             assert_eq!(x, 1);
             counter += 1;
             "hello"
-        }
-        // The trailing comma is optional after these blocks.
+        },
         y = ready(2) => {
             counter += 1;
             10 * y
@@ -320,7 +319,7 @@ async fn test_canceller_mut_streammap() {
             stream_map.inner().unwrap().insert(i, futures::stream::iter(vec![i; i]));
         } finally {
             stream_map.inner().unwrap().start_drain();
-        }
+        },
         stream_map: (_k, v) in WellBehavedStreamMap::new() => outputs.push(v),
     );
     outputs.sort();

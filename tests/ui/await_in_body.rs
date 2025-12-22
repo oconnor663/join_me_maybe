@@ -10,9 +10,9 @@ async fn main() {
     join_me_maybe!(
         _ = ready(1) => {
             ready(2).await
-        }
+        },
         _ in stream::iter([3, 4, 5]) => {
             ready(6).await;
-        }
+        },
     );
 }

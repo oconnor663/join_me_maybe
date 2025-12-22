@@ -5,7 +5,9 @@ error[E0728]: `await` is only allowed inside `async` functions and blocks
 11 | |         _ = ready(1) => {
 12 | |             ready(2).await
    | |                      ^^^^^ only allowed inside `async` functions and blocks
+13 | |         },
 ...  |
+16 | |         },
 17 | |     );
    | |_____- this is not `async`
 
@@ -15,9 +17,10 @@ error[E0728]: `await` is only allowed inside `async` functions and blocks
 10 | /     join_me_maybe!(
 11 | |         _ = ready(1) => {
 12 | |             ready(2).await
-...  |
+13 | |         },
+14 | |         _ in stream::iter([3, 4, 5]) => {
 15 | |             ready(6).await;
    | |                      ^^^^^ only allowed inside `async` functions and blocks
-16 | |         }
+16 | |         },
 17 | |     );
    | |_____- this is not `async`

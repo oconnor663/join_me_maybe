@@ -111,33 +111,10 @@ impl Parse for JoinMeMaybe {
         let mut arms = Vec::new();
         while !input.is_empty() {
             let arm = input.parse::<JoinMeMaybeArm>()?;
-            // As with `match` statements, the trailing comma is optional if the arm ends with
-            // a block.
-            let trailing_comma_optional = matches!(
-                arm.kind,
-                JoinMeMaybeArmKind::FutureAndBody {
-                    body: Expr::Block(_),
-                    ..
-                } | JoinMeMaybeArmKind::StreamAndBody {
-                    body: Expr::Block(_),
-                    finally: None,
-                    ..
-                } | JoinMeMaybeArmKind::StreamAndBody {
-                    finally: Some(Expr::Block(_)),
-                    ..
-                }
-            );
             arms.push(arm);
+            // If there's any more input, require a trailing comma first.
             if !input.is_empty() {
-                if trailing_comma_optional {
-                    // Parse an optional trailing comma if it's there.
-                    if input.peek(syn::Token![,]) {
-                        let _ = input.parse::<syn::Token![,]>()?;
-                    }
-                } else {
-                    // Parse a mandatory trailing comma.
-                    let _ = input.parse::<syn::Token![,]>()?;
-                }
+                let _ = input.parse::<syn::Token![,]>()?;
             }
         }
         if arms.iter().all(|arm| arm.is_maybe) {
