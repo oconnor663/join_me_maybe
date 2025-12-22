@@ -158,11 +158,23 @@ impl<'a> Canceller<'a> {
 /// Like `Canceller`, but in scope for `=>` expressions/blocks with mutable access the environment
 ///
 /// In addition to the `.cancel()` method, this type provides the `.inner()` for accessing the
-/// underlying future or stream. The main intended use case is streams like [`FuturesUnordered`],
-/// which let you add more work dynamically. However, note that `join_me_maybe!` drops futures and
-/// streams after they return `Ready`/`Ready(None)` (or when they're cancelled).
+/// underlying future or stream. This feature is highly experimental. The main intended use case is
+/// streams like [`FuturesUnordered`], which let you add more work dynamically. This makes it
+/// possible for one arm of `join_me_maybe!` to add more work to another arm.
 ///
-/// EXPAND THIS
+/// However, note that `join_me_maybe!` drops futures and streams after they return
+/// `Ready`/`Ready(None)` (or when they're cancelled), while `FuturesUnordered` often return
+/// `Ready(None)` temporarily until it's later refilled. In my opinion, this makes
+/// `FuturesUnordered` a "poorly behaved" stream. In practice it's almost always polled with
+/// `select!`-in-a-loop, which has the interesting property of re-polling all arms whenever any arm
+/// returns non-`Pending`. (Maybe more intuitively, we'd say that it returns `Pending` when all
+/// arms are `Pending`.) On the other hand, `join_me_maybe!` (currently) effectively re-polls all
+/// arms whenever any arm *requests a wakeup*, so you really need adding work itself to trigger a
+/// wakeup. It might be that the designers didn't imagine it was *possible* to call
+/// `FuturesUnordered::push` while the whole thing was effectively being awaited? This feature
+/// makes it possible, which is interesting but tricky.
+///
+/// [`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
 pub struct CancellerMut<'a, 'b, T> {
     canceller: &'a Canceller<'a>,
     inner: Option<Pin<&'b mut T>>,
