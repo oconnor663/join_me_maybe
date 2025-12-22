@@ -1,6 +1,6 @@
 [package]
 name = "join_me_maybe_impl"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Jack O'Connor <oconnor663@gmail.com>"]
 description = "internal proc macro crate for `join_me_maybe`"
 repository = "https://github.com/oconnor663/join_me_maybe"
