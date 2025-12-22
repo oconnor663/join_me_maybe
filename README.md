@@ -117,12 +117,7 @@ context_ (i.e. they cannot `.await`). This makes them similar to [`FutureExt::ma
 to [`FutureExt::then`]). However, note that trying to accomplish the same thing with `map` (or
 `then`) doesn't compile:
 
-```compile_fail
-# #[tokio::main]
-# async fn main() {
-# use join_me_maybe::join_me_maybe;
-# use tokio::time::{sleep, Duration};
-# use futures::FutureExt;
+```rust
 let mut counter = 0;
 join_me_maybe!(
     sleep(Duration::from_millis(1)).map(|_| counter += 1),
@@ -133,7 +128,6 @@ join_me_maybe!(
     }.map(|n| counter += n),
     //        ------- second mutable borrow
 );
-# }
 ```
 
 ### streams
