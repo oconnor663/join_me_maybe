@@ -4,10 +4,10 @@
 
 use core::future::ready;
 use futures::stream;
-use join_me_maybe::join_me_maybe;
+use join_me_maybe::join;
 
 pub async fn foo() {
-    join_me_maybe!(
+    join!(
         ready(0),
         maybe ready(1),
         cancel1: _ = ready(2) => (),

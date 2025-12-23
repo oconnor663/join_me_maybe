@@ -1,6 +1,6 @@
 use futures::stream::FuturesUnordered;
 use futures::{Stream, StreamExt, stream};
-use join_me_maybe::join_me_maybe;
+use join_me_maybe::join;
 use pin_project_lite::pin_project;
 use std::future::ready;
 use std::hash::Hash;
@@ -11,7 +11,7 @@ use tokio_stream::StreamMap;
 
 #[tokio::test]
 async fn test_maybe() {
-    let ret = join_me_maybe!(
+    let ret = join!(
         maybe ready(1),
         ready(2),
         ready(3),
@@ -22,7 +22,7 @@ async fn test_maybe() {
 
 #[tokio::test]
 async fn test_cancel() {
-    let ret = join_me_maybe!(
+    let ret = join!(
         maybe ready(0),
         ready(1),
         foo: async {
@@ -50,7 +50,7 @@ async fn test_cancel() {
 
 #[tokio::test]
 async fn test_early_exit() {
-    let ret = join_me_maybe!(
+    let ret = join!(
         maybe async {
             foo.cancel();
             // Because of this yield, we'll never get to the return value in this arm.
@@ -64,7 +64,7 @@ async fn test_early_exit() {
 
 #[tokio::test]
 async fn test_cancel_already_finished() {
-    let ret = join_me_maybe!(
+    let ret = join!(
         foo: ready(0),
         async {
             // `foo` will have already finished above by the time we try to cancel it here. This is
@@ -82,7 +82,7 @@ async fn test_cancel_already_finished() {
 
 #[tokio::test]
 async fn test_cancel_self() {
-    let ret = join_me_maybe!(
+    let ret = join!(
         foo: async {
             // This arm is cancelling itself, but it's going to exit anyway. Make sure we don't
             // screw up the count.
@@ -97,7 +97,7 @@ async fn test_cancel_self() {
 #[tokio::test]
 async fn test_drop_promptly() {
     let mutex = tokio::sync::Mutex::new(());
-    let ret = join_me_maybe!(
+    let ret = join!(
         foo: async {
             // Polling order is (currently) deterministic, so this arm definitely gets the lock
             // here. If that ever changes we could acquire the guard above and move it in here.
@@ -120,7 +120,7 @@ async fn test_drop_promptly() {
 // actually returns `Pending` before eventually returning `ready`.
 #[tokio::test]
 async fn test_nontrivial_futures() {
-    let ret = join_me_maybe!(
+    let ret = join!(
         maybe async {
             sleep(Duration::from_millis(1)).await;
             1
@@ -137,7 +137,7 @@ async fn test_nontrivial_futures() {
 async fn test_future_arms_with_bodies() {
     let mut counter = 0;
     // Note that all of the arm bodies here can mutate `counter`.
-    let ret = join_me_maybe!(
+    let ret = join!(
         maybe x = ready(1) => {
             assert_eq!(x, 1);
             counter += 1;
@@ -160,7 +160,7 @@ async fn test_stream_arms() {
     let mut elements1 = Vec::new();
     let mut elements2 = Vec::new();
     let mut counter = 0;
-    let ret = join_me_maybe!(
+    let ret = join!(
         x in stream::iter(0..5) => {
             elements1.push(x);
             counter+= 1;
@@ -243,7 +243,7 @@ async fn test_canceller_mut_futuresunordered() {
         i
     });
     let mut outputs = Vec::new();
-    join_me_maybe!(
+    join!(
         i in inputs => {
             unordered.as_pin_mut().unwrap().inner().push(async move {
                 i
@@ -314,7 +314,7 @@ async fn test_canceller_mut_streammap() {
         i
     });
     let mut outputs = Vec::new();
-    join_me_maybe!(
+    join!(
         i in inputs => {
             stream_map.as_pin_mut().unwrap().insert(i, futures::stream::iter(vec![i; i]));
         } finally {

@@ -1,13 +1,13 @@
 error: unexpected end of input, At least one arm must be `definitely`
  --> tests/ui/all_maybe.rs:6:5
   |
-6 | /     join_me_maybe!(
+6 | /     join!(
 7 | |         maybe ready(1),
 8 | |         maybe ready(2),
 9 | |     );
   | |_____^
   |
-  = note: this error originates in the macro `join_me_maybe` (in Nightly builds, run with -Z macro-backtrace for more info)
+  = note: this error originates in the macro `join` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 warning: unused import: `std::future::ready`
  --> tests/ui/all_maybe.rs:2:5

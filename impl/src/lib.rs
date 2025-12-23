@@ -376,7 +376,7 @@ impl ToTokens for JoinMeMaybe {
 }
 
 #[proc_macro]
-pub fn join_me_maybe(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+pub fn join(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let c = parse_macro_input!(input as JoinMeMaybe);
     quote! { #c }.into()
 }

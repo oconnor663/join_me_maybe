@@ -1,7 +1,7 @@
 error[E0728]: `await` is only allowed inside `async` functions and blocks
   --> tests/ui/await_in_body.rs:12:22
    |
-10 | /     join_me_maybe!(
+10 | /     join!(
 11 | |         _ = ready(1) => {
 12 | |             ready(2).await
    | |                      ^^^^^ only allowed inside `async` functions and blocks
@@ -14,7 +14,7 @@ error[E0728]: `await` is only allowed inside `async` functions and blocks
 error[E0728]: `await` is only allowed inside `async` functions and blocks
   --> tests/ui/await_in_body.rs:15:22
    |
-10 | /     join_me_maybe!(
+10 | /     join!(
 11 | |         _ = ready(1) => {
 12 | |             ready(2).await
 13 | |         },
