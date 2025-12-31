@@ -1,11 +1,10 @@
 //! `join_me_maybe` provides an expanded version of the [`futures::join!`]/[`tokio::join!`] macro,
-//! with several added features for cancellation, early exit, and mutable access to the enclosing
-//! scope. Programs that need this sort of control flow often resort to "[`select!`] in a loop"
-//! and/or "`select!` by reference", but those come with a notoriously long list of
-//! footguns.[\[1\]][cancelling_async][\[2\]][rfd400][\[3\]][rfd609] The goal of `join_me_maybe` is
-//! to be more convenient and less error-prone than `select!` in its most common applications. The
-//! stretch goal is to make the case that `select!`-by-reference in particular isn't usually
-//! necessary and should be _considered harmful_.
+//! with added features for cancellation and working with streams. Programs that need this sort of
+//! control flow often resort to "[`select!`] in a loop" and/or "`select!` by reference", but those
+//! come with a notoriously long list of footguns.[\[1\]][cancelling_async][\[2\]][rfd400][\[3\]][rfd609]
+//! The goal of `join_me_maybe` is to be more convenient and less error-prone than `select!` in its
+//! most common applications. The stretch goal is to make the case that `select!`-by-reference in
+//! particular isn't usually necessary and should be _considered harmful_.
 //!
 //! # Features and examples
 //!

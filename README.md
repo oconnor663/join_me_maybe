@@ -1,21 +1,20 @@
 # `join_me_maybe!` [![crates.io](https://img.shields.io/crates/v/join_me_maybe.svg)](https://crates.io/crates/join_me_maybe) [![docs.rs](https://docs.rs/join_me_maybe/badge.svg)](https://docs.rs/join_me_maybe)
 
-`join_me_maybe!` is an expanded version of the [`futures::join!`]/[`tokio::join!`] macro, with
-several added features for cancellation, early exit, and mutable access to the enclosing scope.
-Programs that need this sort of control flow often resort to "[`select!`] in a loop" and/or
-"`select!` by reference", but those come with a notoriously long list of
-footguns.[\[1\]][cancelling_async][\[2\]][rfd400][\[3\]][rfd609] The goal of `join_me_maybe!`
-is to be more convenient and less error-prone than `select!` in its most common applications.
-The stretch goal is to make the case that `select!`-by-reference in particular isn't usually
-necessary and should be _considered harmful_.
+`join_me_maybe` provides an expanded version of the [`futures::join!`]/[`tokio::join!`] macro,
+with added features for cancellation and working with streams. Programs that need this sort of
+control flow often resort to "[`select!`] in a loop" and/or "`select!` by reference", but those
+come with a notoriously long list of footguns.[\[1\]][cancelling_async][\[2\]][rfd400][\[3\]][rfd609]
+The goal of `join_me_maybe` is to be more convenient and less error-prone than `select!` in its
+most common applications. The stretch goal is to make the case that `select!`-by-reference in
+particular isn't usually necessary and should be _considered harmful_.
 
 ## Features and examples
 
-The basic use case works like `join!`, polling each of its arguments to completion and
-returning their outputs in a tuple.
+The basic use case works like other `join!` macros, polling each of its arguments to completion
+and returning their outputs in a tuple.
 
 ```rust
-use join_me_maybe::join_me_maybe;
+use join_me_maybe::join;
 use tokio::time::{sleep, Duration};
 
 // Create a couple futures, one that's ready immediately, and another that takes some time.
@@ -23,11 +22,9 @@ let future1 = std::future::ready(1);
 let future2 = async { sleep(Duration::from_millis(100)).await; 2 };
 
 // Run them concurrently and wait for both of them to finish.
-let (a, b) = join_me_maybe!(future1, future2);
+let (a, b) = join!(future1, future2);
 assert_eq!((a, b), (1, 2));
 ```
-
-(This is an example to get us started, but in practice I would just use `join!` here.)
 
 ### `maybe` cancellation
 
@@ -36,7 +33,7 @@ can be useful with infinite loops of background work that never actually exit. T
 `maybe` futures are wrapped in `Option`.
 
 ```rust
-let outputs = join_me_maybe!(
+let outputs = join!(
     // This future isn't `maybe`, so we'll definitely wait for it to finish.
     async { sleep(Duration::from_millis(100)).await; 1 },
     // Same here.
@@ -62,7 +59,7 @@ wrapped in `Option` too.
 
 ```rust
 let mutex = tokio::sync::Mutex::new(42);
-let outputs = join_me_maybe!(
+let outputs = join!(
     // The `foo:` label here means that all future expressions (including this one) have a
     // `foo` object in scope, which provides a `.cancel()` method.
     foo: async {
@@ -101,7 +98,7 @@ syntax that works similarly:
 
 ```rust
 let mut counter = 0;
-join_me_maybe!(
+join!(
     _ = sleep(Duration::from_millis(1)) => counter += 1,
     n = async {
         sleep(Duration::from_millis(1)).await;
@@ -119,7 +116,7 @@ to [`FutureExt::then`]). However, note that trying to accomplish the same thing 
 
 ```rust
 let mut counter = 0;
-join_me_maybe!(
+join!(
     sleep(Duration::from_millis(1)).map(|_| counter += 1),
     //                                      ------- first mutable borrow
     async {
@@ -144,7 +141,7 @@ with futures:
 use futures::stream::{self, StreamExt};
 
 let mut counter = 0;
-join_me_maybe!(
+join!(
     my_stream: _ in stream::iter(0..5).then(async |_| {
         sleep(Duration::from_millis(10)).await
     }) => {
@@ -170,16 +167,16 @@ with mutable access to the calling scope (those after `=>` and `finally`), `labe
 support an additional method: `.as_pin_mut()`. This returns an `Option<Pin<&mut T>>` pointing
 to the corresponding future or stream. (Or `None` if it's already completed/cancelled.) You can
 use this to mutate e.g. a [`FuturesUnordered`] or a [`StreamMap`] to add more work to it while
-it's being polled. (Not literally while it's being polled, but while it's owned by
-`join_me_maybe!` and guaranteed not to be "snoozed".) This is intended as an alternative to
-patterns that await futures *by reference*, which tends to be prone to "snoozing" mistakes.
+it's being polled. (Not literally while it's being polled, but while it's owned by `join!` and
+guaranteed not to be "snoozed".) This is intended as an alternative to patterns that await
+futures *by reference*, which tends to be prone to "snoozing" mistakes.
 
 Unfortunately, streams that you can add work to dynamically are usually "poorly behaved" in the
 sense that they often return `Ready(None)` for a while, until more work is eventually added and
 they start returning `Ready(Some(_))` again. This is at odds with the [usual rule] that you
 shouldn't poll a stream again after it returns `Ready(Some)`, but it does work with
 `select!`-in-a-loop. (In Tokio it requires an `if` guard, and with `futures::select!` it leans
-on the "fused" requirement.) However, it does _not_ naturally work with `join_me_maybe!`, which
+on the "fused" requirement.) However, it does _not_ naturally work with `join_me_maybe`, which
 interprets `Ready(None)` as "end of stream" and promptly drops the whole stream. ([Like it's
 supposed to!][usual rule]) For a stream to work well with this feature, it needs to do two
 things that as far as I know none of the dynamic streams currently do:
@@ -198,7 +195,7 @@ need a lot of baking before I can recommend it.
 
 ### `no_std`
 
-`join_me_maybe!` doesn't heap allocate and is compatible with `#![no_std]`.
+`join_me_maybe` doesn't heap allocate and is compatible with `#![no_std]`.
 
 [`futures::join!`]: https://docs.rs/futures/latest/futures/macro.join.html
 [`tokio::join!`]: https://docs.rs/tokio/latest/tokio/macro.join.html

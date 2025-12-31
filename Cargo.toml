@@ -1,8 +1,8 @@
 [package]
 name = "join_me_maybe"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Jack O'Connor <oconnor663@gmail.com>"]
-description = "halfway between `join!` and `select!`"
+description = "a `join!` macro with extra features, including cancellation and early exit"
 repository = "https://github.com/oconnor663/join_me_maybe"
 license = "Apache-2.0 OR MIT"
 documentation = "https://docs.rs/join_me_maybe"
@@ -10,7 +10,7 @@ readme = "README.md"
 edition = "2024"
 
 [dependencies]
-join_me_maybe_impl = { version = "0.2", path = "impl" }
+join_me_maybe_impl = { version = "0.3", path = "impl" }
 futures = { version = "0.3.31", default-features = false }
 pin-project-lite = "0.2.16"
 
