@@ -2,6 +2,10 @@
 /// macro-expanded code to look at without a lot of extra noise.
 #[tokio::main]
 async fn main() {
+    inner().await;
+}
+
+async fn inner() {
     join_me_maybe::join!(
         async { 1 },
         maybe async { 2 },
