@@ -339,3 +339,16 @@ async fn test_potentially_ambiguous_colons() {
     );
     assert_eq!(ret, (0, 1, 2, Some(3), Some(4), Some(5)));
 }
+
+#[tokio::test]
+async fn test_finally_values() {
+    // Streams with a finally block return a value.
+    let ret = join!(
+        maybe _ in futures::stream::iter([()]) => {},
+        maybe _ in futures::stream::iter([()]) => {} finally 99,
+        _ in futures::stream::iter([()]) => {},
+        _ in futures::stream::iter([()]) => {} finally 42,
+        maybe _ in futures::stream::iter([()]) => {} finally 1_000_000,
+    );
+    assert_eq!(ret, ((), Some(99), (), 42, None));
+}

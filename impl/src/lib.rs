@@ -340,7 +340,10 @@ impl ToTokens for JoinMeMaybe {
         for (arm, arm_output) in self.arms.iter().zip(&arm_outputs) {
             match &arm.kind {
                 JoinMeMaybeArmKind::FutureOnly { .. }
-                | JoinMeMaybeArmKind::FutureAndBody { .. } => {
+                | JoinMeMaybeArmKind::FutureAndBody { .. }
+                | JoinMeMaybeArmKind::StreamAndBody {
+                    finally: Some(_), ..
+                } => {
                     if arm.is_maybe || arm.cancel_label.is_some() {
                         // This arm is cancellable. Keep it wrapped in `Option`.
                         return_values.extend(quote! {
@@ -353,8 +356,10 @@ impl ToTokens for JoinMeMaybe {
                         });
                     }
                 }
-                // Streams don't return anything.
-                JoinMeMaybeArmKind::StreamAndBody { .. } => return_values.extend(quote! { (), }),
+                // Streams without `finally`, don't return anything.
+                JoinMeMaybeArmKind::StreamAndBody { finally: None, .. } => {
+                    return_values.extend(quote! { (), })
+                }
             }
         }
 

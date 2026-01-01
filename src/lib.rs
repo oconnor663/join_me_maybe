@@ -189,6 +189,26 @@
 //! # }
 //! ```
 //!
+//! Streams have no return value by default, but streams with a `finally` expression take the value
+//! of that expression:
+//!
+//! ```
+//! # #[tokio::main]
+//! # async fn main() {
+//! # use join_me_maybe::join;
+//! # use futures::stream;
+//! let ret = join!(
+//!     _ in stream::iter([42]) => {},
+//!     maybe _ in stream::iter([42]) => {} finally 1,
+//!     _ in stream::iter([42]) => {} finally 2,
+//!     // All the streams above finish immediately, so this maybe` stream gets cancelled and
+//!     // returns `None` instead of evaluating its its `finally` expression.
+//!     maybe _ in stream::iter([42]) => {} finally 3,
+//! );
+//! assert_eq!(ret, ((), Some(1), 2, None));
+//! # }
+//! ```
+//!
 //! ## mutable access to futures and streams
 //!
 //! This feature is even more experimental than everything else above. In synchronous expressions
