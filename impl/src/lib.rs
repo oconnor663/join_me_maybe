@@ -265,7 +265,7 @@ impl ToTokens for JoinMeMaybe {
                         loop {
                             match ::futures::Stream::poll_next(#arm_name.as_mut(), cx) {
                                 ::core::task::Poll::Ready(::core::option::Option::Some(#poll_output)) => {
-                                    (|#pattern| {
+                                    (|#pattern| -> () {
                                         #cancellermuts
                                         #body
                                     })(#poll_output);
