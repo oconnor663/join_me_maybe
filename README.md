@@ -264,3 +264,10 @@ concurrent_bikeshed {
 Another big advantage of adding dedicated syntax for this is that it could support
 `return`/`break`/`continue` as usual to diverge from inside any arm. That would be especially
 helpful for error handling with `?`, which is awkward in concurrent contexts today.
+
+Aside: All the options for divergence in Rust today would naturally cancel the whole
+`concurrent_bikeshed`. However, if Rust eventually stabilizes `async gen fn` and the `yield`
+keyword, then `yield` probably should *not* be allowed inside `concurrent_bikeshed`. Yielding
+from any arm would snooze the other arms at arbitrary `.await` points (not `yield` points),
+where they could be holding locks. This shouldn't be allowed for the same reason that pausing
+or cancelling a running thread is not allowed.
