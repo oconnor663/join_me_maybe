@@ -131,11 +131,41 @@ join!(
 
 Similar to the `=>` syntax for futures above, you can also drive a stream, using `<pattern> in
 <stream>` instead of `<pattern> = <future>`. In this case the following expression executes for
-each item in the stream. You can optionally follow that with the `finally` keyword and another
-expression that executes after the stream is finished (if it's not cancelled). Both of these
-expressions get mutable access to the environment (and cannot `.await`). Here's an example of
-driving a stream, together with `label:`/`.cancel()`, which works with streams like it does
-with futures:
+each item in the stream. It gets mutable access to the environment, but it cannot `.await`:
+
+```rust
+use futures::stream;
+
+let mut total = 0;
+join!(
+    n in stream::iter([1, 2, 3]) => total += n,
+    n in stream::iter([4, 5, 6]) => total += n,
+);
+assert_eq!(total, 21);
+```
+
+You can optionally follow this syntax with the `finally` keyword and another expression that
+executes after the stream is finished (if it's not cancelled). This also gets mutable access to
+the environment and cannot `.await`. Streams have no return value by default, but streams with
+a `finally` expression take the value of that expression:
+
+```rust
+let ret = join!(
+    // This stream has no `finally` expression, so it returns `()`.
+    _ in stream::iter([42]) => {},
+    // This arm's `finally` expression is `1`, and the `maybe` means we get `Some(1)`.
+    maybe _ in stream::iter([42]) => {} finally 1,
+    // Same, but without `maybe` we get the unwrapped value.
+    _ in stream::iter([42]) => {} finally 2,
+    // All the streams above finish immediately, so this `maybe` stream gets cancelled and
+    // returns `None` instead of evaluating its `finally` expression.
+    maybe _ in stream::iter([42]) => {} finally 3,
+);
+assert_eq!(ret, ((), Some(1), 2, None));
+```
+
+Here's an example of driving a stream together with `label:`/`.cancel()`, which works with
+streams like it does with futures:
 
 ```rust
 use futures::stream::{self, StreamExt};
@@ -158,21 +188,6 @@ join!(
     },
 );
 assert_eq!(counter, 3);
-```
-
-Streams have no return value by default, but streams with a `finally` expression take the value
-of that expression:
-
-```rust
-let ret = join!(
-    _ in stream::iter([42]) => {},
-    maybe _ in stream::iter([42]) => {} finally 1,
-    _ in stream::iter([42]) => {} finally 2,
-    // All the streams above finish immediately, so this maybe` stream gets cancelled and
-    // returns `None` instead of evaluating its its `finally` expression.
-    maybe _ in stream::iter([42]) => {} finally 3,
-);
-assert_eq!(ret, ((), Some(1), 2, None));
 ```
 
 ### mutable access to futures and streams
@@ -283,6 +298,7 @@ helpful for error handling with `?`, which is awkward in concurrent contexts tod
 Aside: All the options for divergence in Rust today would naturally cancel the whole
 `concurrent_bikeshed`. However, if Rust eventually stabilizes `async gen fn` and the `yield`
 keyword, then `yield` probably should *not* be allowed inside `concurrent_bikeshed`. Yielding
-from any arm would snooze the other arms at arbitrary `.await` points (not `yield` points),
-where they could be holding locks. This shouldn't be allowed for the same reason that pausing
-or cancelling a running thread is not allowed.
+from any arm would snooze the other arms at arbitrary `.await` points (generally not `yield`
+points), where they could be holding locks. This is deadlock-prone in the same way that pausing
+or cancelling threads is, and we don't let safe code do either of those things. At the very
+least it should be a scary warning.
