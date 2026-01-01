@@ -325,3 +325,17 @@ async fn test_canceller_mut_streammap() {
     outputs.sort();
     assert_eq!(outputs, [1, 2, 2, 3, 3, 3, 4, 4, 4, 4]);
 }
+
+#[tokio::test]
+async fn test_potentially_ambiguous_colons() {
+    // All of these examples need to parse cleanly.
+    let ret = join!(
+        ready(0),
+        core::future::ready(1),
+        ::core::future::ready(2),
+        label3: ready(3),
+        label4: core::future::ready(4),
+        label5: ::core::future::ready(5),
+    );
+    assert_eq!(ret, (0, 1, 2, Some(3), Some(4), Some(5)));
+}

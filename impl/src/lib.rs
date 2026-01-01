@@ -38,7 +38,11 @@ struct JoinMeMaybeArm {
 
 impl Parse for JoinMeMaybeArm {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let cancel_label = if input.peek(syn::Ident) && input.peek2(syn::Token![:]) {
+        let cancel_label = if input.peek(syn::Ident)
+            && input.peek2(syn::Token![:])
+            // See `test_potentially_ambiguous_colons`.
+            && !input.peek2(syn::Token![::])
+        {
             let ident = input.parse::<Ident>()?;
             _ = input.parse::<syn::Token![:]>()?;
             Some(ident)
