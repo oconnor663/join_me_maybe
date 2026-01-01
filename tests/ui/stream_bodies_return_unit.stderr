@@ -5,4 +5,4 @@ error[E0308]: mismatched types
  9 | |         _ in stream::iter([42]) => 99,
    | |                                    ^^ expected `()`, found integer
 10 | |     );
-   | |_____- expected `()` because of return type
+   | |_____- expected due to this

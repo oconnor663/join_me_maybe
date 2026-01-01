@@ -1,13 +1,7 @@
-use futures::stream::FuturesUnordered;
-use futures::{Stream, StreamExt, stream};
+use futures::stream;
 use join_me_maybe::join;
-use pin_project_lite::pin_project;
 use std::future::ready;
-use std::hash::Hash;
-use std::pin::Pin;
-use std::task::{Context, Poll, Waker};
 use tokio::time::{Duration, sleep};
-use tokio_stream::StreamMap;
 
 #[tokio::test]
 async fn test_maybe() {
@@ -177,154 +171,150 @@ async fn test_stream_arms() {
     assert_eq!(ret, ((), (), ()));
 }
 
-fn resuming<S>(stream: S) -> ResumingStream<S> {
-    ResumingStream {
-        stream,
-        waker: None,
-        ended: false,
-    }
-}
+// fn resuming<S>(stream: S) -> ResumingStream<S> {
+//     ResumingStream {
+//         stream: Box::pin(stream),
+//         waker: None,
+//         ended: false,
+//     }
+// }
 
-pin_project! {
-    struct ResumingStream<S> {
-        #[pin]
-        stream: S,
-        waker: Option<Waker>,
-        ended: bool,
-    }
-}
+// struct ResumingStream<S> {
+//     stream: Pin<Box<S>>,
+//     waker: Option<Waker>,
+//     ended: bool,
+// }
 
-impl<S> ResumingStream<S> {
-    fn inner(self: Pin<&mut Self>) -> Pin<&mut S> {
-        let this = self.project();
-        if let Some(waker) = this.waker {
-            // Mutating the stream might mean it needs to be polled again.
-            waker.wake_by_ref();
-        }
-        this.stream
-    }
+// impl<S> ResumingStream<S> {
+//     fn inner(self: Pin<&mut Self>) -> Pin<&mut S> {
+//         if let Some(waker) = &self.waker {
+//             // Mutating the stream might mean it needs to be polled again.
+//             waker.wake_by_ref();
+//         }
+//         self.get_mut().stream.as_mut()
+//     }
 
-    fn end(&mut self) {
-        self.ended = true;
-    }
-}
+//     fn end(&mut self) {
+//         self.ended = true;
+//     }
+// }
 
-impl<S: Stream> Stream for ResumingStream<S> {
-    type Item = S::Item;
+// impl<S: Stream> Stream for ResumingStream<S> {
+//     type Item = S::Item;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        let this = self.project();
+//     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+//         match self.stream.as_mut().poll_next(cx) {
+//             // Once `self.ended` is set, we can let the caller observe end-of-stream.
+//             Poll::Ready(None) if self.ended => Poll::Ready(None),
+//             // If not `self.ended`, refuse to allow the underlying stream to report that it's done.
+//             // Of course this causes us to poll the underlying stream again after it *tried* to
+//             // report that it's done, which isn't generally allowed, but `FuturesUnordered` expects
+//             // it.
+//             Poll::Pending | Poll::Ready(None) => {
+//                 // Stash the waker so that we can request a re-poll if the inner stream is mutated.
+//                 self.waker = Some(cx.waker().clone());
+//                 Poll::Pending
+//             }
+//             Poll::Ready(Some(item)) => {
+//                 // Wakeups are not registered unless Pending is returned. Clear the waker.
+//                 self.waker = None;
+//                 Poll::Ready(Some(item))
+//             }
+//         }
+//     }
+// }
 
-        match this.stream.poll_next(cx) {
-            // Once `self.ended` is set, we can let the caller observe end-of-stream.
-            Poll::Ready(None) if *this.ended => Poll::Ready(None),
-            // If not `self.ended`, refuse to allow the underlying stream to report that it's done.
-            // Of course this causes us to poll the underlying stream again after it *tried* to
-            // report that it's done, which isn't generally allowed, but `FuturesUnordered` expects
-            // it.
-            Poll::Pending | Poll::Ready(None) => {
-                // Stash the waker so that we can request a re-poll if the inner stream is mutated.
-                *this.waker = Some(cx.waker().clone());
-                Poll::Pending
-            }
-            Poll::Ready(Some(item)) => {
-                // Wakeups are not registered unless Pending is returned. Clear the waker.
-                *this.waker = None;
-                Poll::Ready(Some(item))
-            }
-        }
-    }
-}
+// TODO: add back support for mutation
+// #[tokio::test]
+// async fn test_canceller_mut_futuresunordered() {
+//     let inputs = futures::stream::iter(0..5).then(|i| async move {
+//         sleep(Duration::from_millis(1)).await;
+//         i
+//     });
+//     let mut outputs = Vec::new();
+//     join!(
+//         i in inputs => {
+//             unordered.as_pin_mut().unwrap().inner().push(async move {
+//                 i
+//             });
+//         } finally unordered.as_pin_mut().unwrap().end(),
+//         unordered: i in resuming(FuturesUnordered::new()) => outputs.push(i),
+//     );
+//     outputs.sort();
+//     assert_eq!(outputs, [0, 1, 2, 3, 4]);
+// }
 
-#[tokio::test]
-async fn test_canceller_mut_futuresunordered() {
-    let inputs = futures::stream::iter(0..5).then(|i| async move {
-        sleep(Duration::from_millis(1)).await;
-        i
-    });
-    let mut outputs = Vec::new();
-    join!(
-        i in inputs => {
-            unordered.as_pin_mut().unwrap().inner().push(async move {
-                i
-            });
-        } finally unordered.as_pin_mut().unwrap().end(),
-        unordered: i in resuming(FuturesUnordered::new()) => outputs.push(i),
-    );
-    outputs.sort();
-    assert_eq!(outputs, [0, 1, 2, 3, 4]);
-}
+// // Similar to `ResumingStream` above, but more tailored to `StreamMap` specifically.
+// struct WellBehavedStreamMap<K, V> {
+//     map: StreamMap<K, V>,
+//     waker: Option<Waker>,
+//     drain: bool,
+// }
 
-// Similar to `ResumingStream` above, but more tailored to `StreamMap` specifically.
-struct WellBehavedStreamMap<K, V> {
-    map: StreamMap<K, V>,
-    waker: Option<Waker>,
-    drain: bool,
-}
+// impl<K, V> WellBehavedStreamMap<K, V> {
+//     fn new() -> Self {
+//         Self {
+//             map: StreamMap::new(),
+//             waker: None,
+//             drain: false,
+//         }
+//     }
 
-impl<K, V> WellBehavedStreamMap<K, V> {
-    fn new() -> Self {
-        Self {
-            map: StreamMap::new(),
-            waker: None,
-            drain: false,
-        }
-    }
+//     fn start_drain(&mut self) {
+//         self.drain = true;
+//     }
+// }
 
-    fn start_drain(&mut self) {
-        self.drain = true;
-    }
-}
+// impl<K: Hash + Eq, V: Stream> WellBehavedStreamMap<K, V> {
+//     fn insert(&mut self, key: K, stream: V) {
+//         assert!(!self.drain, "already draining");
+//         self.map.insert(key, stream);
+//         if let Some(waker) = &self.waker {
+//             waker.wake_by_ref();
+//         }
+//     }
+// }
 
-impl<K: Hash + Eq, V: Stream> WellBehavedStreamMap<K, V> {
-    fn insert(&mut self, key: K, stream: V) {
-        assert!(!self.drain, "already draining");
-        self.map.insert(key, stream);
-        if let Some(waker) = &self.waker {
-            waker.wake_by_ref();
-        }
-    }
-}
+// impl<K: Clone + Unpin, V: Stream + Unpin> Stream for WellBehavedStreamMap<K, V> {
+//     type Item = (K, V::Item);
 
-impl<K: Clone + Unpin, V: Stream + Unpin> Stream for WellBehavedStreamMap<K, V> {
-    type Item = (K, V::Item);
+//     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+//         match Pin::new(&mut self.map).poll_next(cx) {
+//             Poll::Ready(None) if self.drain => {
+//                 // Once drain is set, we can let the caller observe end-of-stream.
+//                 Poll::Ready(None)
+//             }
+//             Poll::Pending | Poll::Ready(None) => {
+//                 self.waker = Some(cx.waker().clone());
+//                 Poll::Pending
+//             }
+//             Poll::Ready(Some(item)) => {
+//                 self.waker = None;
+//                 Poll::Ready(Some(item))
+//             }
+//         }
+//     }
+// }
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        match Pin::new(&mut self.map).poll_next(cx) {
-            Poll::Ready(None) if self.drain => {
-                // Once drain is set, we can let the caller observe end-of-stream.
-                Poll::Ready(None)
-            }
-            Poll::Pending | Poll::Ready(None) => {
-                self.waker = Some(cx.waker().clone());
-                Poll::Pending
-            }
-            Poll::Ready(Some(item)) => {
-                self.waker = None;
-                Poll::Ready(Some(item))
-            }
-        }
-    }
-}
-
-#[tokio::test]
-async fn test_canceller_mut_streammap() {
-    let inputs = futures::stream::iter(0..5).then(|i| async move {
-        sleep(Duration::from_millis(1)).await;
-        i
-    });
-    let mut outputs = Vec::new();
-    join!(
-        i in inputs => {
-            stream_map.as_pin_mut().unwrap().insert(i, futures::stream::iter(vec![i; i]));
-        } finally {
-            stream_map.as_pin_mut().unwrap().start_drain();
-        },
-        stream_map: (_k, v) in WellBehavedStreamMap::new() => outputs.push(v),
-    );
-    outputs.sort();
-    assert_eq!(outputs, [1, 2, 2, 3, 3, 3, 4, 4, 4, 4]);
-}
+// TODO: add back support for mutation
+// #[tokio::test]
+// async fn test_canceller_mut_streammap() {
+//     let inputs = futures::stream::iter(0..5).then(|i| async move {
+//         sleep(Duration::from_millis(1)).await;
+//         i
+//     });
+//     let mut outputs = Vec::new();
+//     join!(
+//         i in inputs => {
+//             stream_map.as_pin_mut().unwrap().insert(i, futures::stream::iter(vec![i; i]));
+//         } finally {
+//             stream_map.as_pin_mut().unwrap().start_drain();
+//         },
+//         stream_map: (_k, v) in WellBehavedStreamMap::new() => outputs.push(v),
+//     );
+//     outputs.sort();
+//     assert_eq!(outputs, [1, 2, 2, 3, 3, 3, 4, 4, 4, 4]);
+// }
 
 #[tokio::test]
 async fn test_potentially_ambiguous_colons() {
@@ -351,4 +341,24 @@ async fn test_finally_values() {
         maybe _ in futures::stream::iter([()]) => {} finally 1_000_000,
     );
     assert_eq!(ret, ((), Some(99), (), 42, None));
+}
+
+#[tokio::test]
+async fn test_await_in_bodies() {
+    let mut x = 0;
+    let ret = join!(
+        y = ready(1) => {
+            x += y;
+            ready(42).await
+        },
+        z in stream::iter([10]) => {
+            x += z;
+            sleep(Duration::from_millis(1)).await;
+        } finally {
+            x += 100;
+            ready(99).await;
+            x
+        },
+    );
+    assert_eq!(ret, (42, 111));
 }

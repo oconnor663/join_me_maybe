@@ -11,7 +11,7 @@ mod kw {
     syn::custom_keyword!(finally);
 }
 
-enum JoinMeMaybeArmKind {
+enum ArmKind {
     FutureOnly {
         future: Expr,
     },
@@ -33,7 +33,7 @@ struct JoinMeMaybeArm {
     // "Definitely" is the opposite of "maybe". Previously there was a `definitely` keyword, but it
     // was unnecessarily verbose.
     is_maybe: bool,
-    kind: JoinMeMaybeArmKind,
+    kind: ArmKind,
 }
 
 impl Parse for JoinMeMaybeArm {
@@ -71,7 +71,7 @@ impl Parse for JoinMeMaybeArm {
             let future = input.parse()?;
             _ = input.parse::<syn::Token![=>]>()?;
             let body = input.parse()?;
-            JoinMeMaybeArmKind::FutureAndBody {
+            ArmKind::FutureAndBody {
                 pattern,
                 future,
                 body,
@@ -88,7 +88,7 @@ impl Parse for JoinMeMaybeArm {
             } else {
                 None
             };
-            JoinMeMaybeArmKind::StreamAndBody {
+            ArmKind::StreamAndBody {
                 pattern,
                 stream,
                 body,
@@ -96,7 +96,7 @@ impl Parse for JoinMeMaybeArm {
             }
         } else {
             let future = input.parse()?;
-            JoinMeMaybeArmKind::FutureOnly { future }
+            ArmKind::FutureOnly { future }
         };
         Ok(Self {
             cancel_label,
@@ -132,10 +132,9 @@ impl Parse for JoinMeMaybe {
 
 impl ToTokens for JoinMeMaybe {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
+        // Define the finished flags and cancellers. The finished flags get set to true whenever an
+        // arm finishes naturally (poll returns Ready) *or* another arm cancels it.
         let mut initializers = TokenStream2::new();
-
-        // First define the finished flags and cancellers. The finished flags get set to true
-        // whenever an arm finishes naturally (poll returns Ready) *or* another arm cancels it.
         let total_definitely = self.arms.iter().filter(|arm| !arm.is_maybe).count();
         let definitely_finished_count =
             format_ident!("definitely_finished_count", span = Span::mixed_site());
@@ -145,6 +144,16 @@ impl ToTokens for JoinMeMaybe {
         let finished_flag_names: Vec<_> = (0..self.arms.len())
             .map(|i| format_ident!("arm_{i}_finished", span = Span::mixed_site()))
             .collect();
+        // We need a flag to differentiate "this stream finished and was dropped" from "this stream
+        // was cancelled".
+        let should_run_finally_flag_names: Vec<_> = (0..self.arms.len())
+            .map(|i| format_ident!("arm_{i}_should_run_finally", span = Span::mixed_site()))
+            .collect();
+        // Parens are generally necessary here (e.g. for negation) even though the spots where
+        // they're unnecessary generate a bunch of warnings in expanded code.
+        let scrutinees_finished = quote! {
+            (#definitely_finished_count.load(::core::sync::atomic::Ordering::Relaxed) == #total_definitely)
+        };
         for i in 0..self.arms.len() {
             if let Some(label) = &self.arms[i].cancel_label {
                 let flag_name = &finished_flag_names[i];
@@ -153,13 +162,13 @@ impl ToTokens for JoinMeMaybe {
                 });
                 if self.arms[i].is_maybe {
                     initializers.extend(quote! {
-                        let #label = join_me_maybe::_impl::new_maybe_canceller(
+                        let #label = ::join_me_maybe::_impl::new_maybe_canceller(
                             &#flag_name,
                         );
                     });
                 } else {
                     initializers.extend(quote! {
-                        let #label = join_me_maybe::_impl::new_definitely_canceller(
+                        let #label = ::join_me_maybe::_impl::new_definitely_canceller(
                             &#flag_name,
                             &#definitely_finished_count,
                         );
@@ -172,29 +181,44 @@ impl ToTokens for JoinMeMaybe {
         let arm_names: Vec<_> = (0..self.arms.len())
             .map(|i| format_ident!("arm_{i}", span = Span::mixed_site()))
             .collect();
+        let arm_items: Vec<_> = (0..self.arms.len())
+            .map(|i| format_ident!("arm_{i}_item", span = Span::mixed_site()))
+            .collect();
         let arm_outputs: Vec<_> = (0..self.arms.len())
             .map(|i| format_ident!("arm_{i}_output", span = Span::mixed_site()))
             .collect();
-        for ((arm, arm_name), arm_output) in self.arms.iter().zip(&arm_names).zip(&arm_outputs) {
-            match &arm.kind {
-                JoinMeMaybeArmKind::FutureOnly { future }
-                | JoinMeMaybeArmKind::FutureAndBody { future, .. } => {
+        for i in 0..self.arms.len() {
+            let arm_name = &arm_names[i];
+            let arm_item = &arm_items[i];
+            let arm_output = &arm_outputs[i];
+            match &self.arms[i].kind {
+                ArmKind::FutureOnly { future } => {
                     initializers.extend(quote! {
-                        // We can't use `futures::future::Fuse`, because it doesn't expose the
-                        // inner future. This version makes the `inner` field `pub`. However,
-                        // `futures::stream::Fuse` does expose the inner stream through methods.
-                        let mut #arm_name = ::core::pin::pin!(::join_me_maybe::_impl::fuse_future(#future));
+                        // XXX: We could `pin!` these and use `FusedFuture` or similar to drop them
+                        // promptly, but we're already managing `#run_body_future` with `Option`
+                        // and `Pin::new_unchecked`, so just do the same here.
+                        let mut #arm_name = ::core::option::Option::Some(#future);
                         let mut #arm_output = ::core::option::Option::None;
                     });
                 }
-                JoinMeMaybeArmKind::StreamAndBody {
+                ArmKind::FutureAndBody { future, .. } => {
+                    initializers.extend(quote! {
+                        let mut #arm_name = ::core::option::Option::Some(#future);
+                        let mut #arm_item = ::core::option::Option::None;
+                        let mut #arm_output = ::core::option::Option::None;
+                    });
+                }
+                ArmKind::StreamAndBody {
                     stream, finally, ..
                 } => {
                     initializers.extend(quote! {
-                        let mut #arm_name = ::core::pin::pin!(::join_me_maybe::_impl::fuse_stream(#stream));
+                        let mut #arm_name = ::core::option::Option::Some(#stream);
+                        let mut #arm_item = ::core::option::Option::None;
                     });
                     if finally.is_some() {
+                        let should_run_finally = &should_run_finally_flag_names[i];
                         initializers.extend(quote! {
+                            let mut #should_run_finally = false;
                             let mut #arm_output = ::core::option::Option::None;
                         });
                     }
@@ -202,82 +226,168 @@ impl ToTokens for JoinMeMaybe {
             }
         }
 
-        // Assemble the list of `CancellerMut` declarations. We emit this inside multiple times,
-        // inside of each `poll_map`/`poll_for_each` closure.
-        let mut cancellermuts = TokenStream2::new();
-        for i in 0..self.arms.len() {
-            let arm = &self.arms[i];
-            let arm_name = &arm_names[i];
-            if let Some(label) = &arm.cancel_label {
-                cancellermuts.extend(quote! {
-                    let mut #label = ::join_me_maybe::_impl::new_canceller_mut(
-                        &#label,
-                        #arm_name.as_mut().get_pin_mut(),
-                    );
+        // If any arm has a body (or a `finally` expression, but that requires a body), we need to
+        // generate a "body future" with a `match` statement in of it, plus an enum to drive that
+        // `match`.
+        let mut bodies_input_enum_generic_params = TokenStream2::new();
+        let mut bodies_input_enum_variants = TokenStream2::new();
+        let mut bodies_output_enum_generic_params = TokenStream2::new();
+        let mut bodies_output_enum_variants = TokenStream2::new();
+        let mut bodies_match_arms = TokenStream2::new();
+        let mut has_bodies = false;
+        // Mixed-site identifiers can hide variables from the caller, but they can't hide
+        // things that have no scope, like a module. Incorporate the crate version into the
+        // module name, to make it reasonably private in practice. (A random name would be
+        // *really* private, but that would make the build nondeterministic.)
+        let private_module_name = format_ident!(
+            "__{}_v{}",
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION").replace('.', "_"),
+        );
+        for (i, arm) in self.arms.iter().enumerate() {
+            if let ArmKind::FutureAndBody { pattern, body, .. } = &arm.kind {
+                has_bodies = true;
+                let param_name = format_ident!("T{i}");
+                let variant_name = format_ident!("Arm{i}");
+                bodies_input_enum_generic_params.extend(quote! { #param_name, });
+                bodies_input_enum_variants.extend(quote! { #variant_name(#param_name), });
+                bodies_output_enum_generic_params.extend(quote! { #param_name, });
+                bodies_output_enum_variants.extend(quote! { #variant_name(#param_name), });
+                bodies_match_arms.extend(quote! {
+                    ArmsInput::#variant_name(#pattern) => ArmsOutput::#variant_name(#body),
                 });
             }
+            if let ArmKind::StreamAndBody {
+                pattern,
+                body,
+                finally,
+                ..
+            } = &arm.kind
+            {
+                has_bodies = true;
+                let param_name = format_ident!("T{i}");
+                let variant_name = format_ident!("Arm{i}");
+                bodies_input_enum_generic_params.extend(quote! { #param_name, });
+                bodies_input_enum_variants.extend(quote! { #variant_name(#param_name), });
+                // Stream bodies always output `()`.
+                bodies_output_enum_variants.extend(quote! { #variant_name, });
+                bodies_match_arms.extend(quote! {
+                    ArmsInput::#variant_name(#pattern) => {
+                        let _: () = #body;
+                        ArmsOutput::#variant_name
+                    }
+                });
+                if let Some(finally) = finally {
+                    let variant_name = format_ident!("Arm{i}Finally");
+                    // Stream finally expressions have no input.
+                    bodies_input_enum_variants.extend(quote! { #variant_name, });
+                    bodies_output_enum_generic_params.extend(quote! { #param_name, });
+                    bodies_output_enum_variants.extend(quote! { #variant_name(#param_name), });
+                    bodies_match_arms.extend(quote! {
+                        ArmsInput::#variant_name => ArmsOutput::#variant_name(#finally),
+                    });
+                }
+            }
+        }
+        let run_body_fn = format_ident!("run_body_fn", span = Span::mixed_site());
+        let run_body_future = format_ident!("run_body_future", span = Span::mixed_site());
+        let mut run_body_tokens = TokenStream2::new();
+        if has_bodies {
+            run_body_tokens.extend(quote! {
+                mod #private_module_name {
+                    pub enum ArmsInput<#bodies_input_enum_generic_params> {
+                        #bodies_input_enum_variants
+                    }
+                    pub enum ArmsOutput<#bodies_output_enum_generic_params> {
+                        #bodies_output_enum_variants
+                    }
+                }
+                let mut #run_body_fn = async |item| {
+                    use #private_module_name::{ArmsInput, ArmsOutput};
+                    match item {
+                        #bodies_match_arms
+                    }
+                };
+                // XXX: Morally we should `pin!` this. However, if we do, then we won't be able to
+                // `drop()` it. We need explicit drops below so that the new body future doens't
+                // overlap in time with the old one. (With simple assignment, they do overlap,
+                // because the compiler needs to be defensive about panics.) This is necessary when
+                // the body closure 1) is mutating / AsyncFnMut and 2) needs Drop.
+                let mut #run_body_future = ::core::option::Option::None;
+            });
         }
 
         let mut polling_and_counting = TokenStream2::new();
-        let poll_output = format_ident!("poll_output", span = Span::mixed_site());
         for i in 0..self.arms.len() {
             let arm = &self.arms[i];
             let arm_name = &arm_names[i];
+            let arm_item = &arm_items[i];
+            let arm_should_run_finally = &should_run_finally_flag_names[i];
             let arm_output = &arm_outputs[i];
             let finished_flag = &finished_flag_names[i];
             let poll_is_ready = match &arm.kind {
-                JoinMeMaybeArmKind::FutureOnly { .. } => quote! {
-                    match ::core::future::Future::poll(#arm_name.as_mut(), cx) {
-                        ::core::task::Poll::Ready(#poll_output) => {
-                            #arm_output = ::core::option::Option::Some(#poll_output);
-                            true
+                ArmKind::FutureOnly { .. } => quote! {
+                    if let Some(future) = #arm_name.as_mut() {
+                        let pinned = unsafe { ::core::pin::Pin::new_unchecked(future) };
+                        match ::join_me_maybe::_impl::PollOnce(pinned).await {
+                            ::core::task::Poll::Ready(output) => {
+                                #arm_name = None;
+                                #arm_output = ::core::option::Option::Some(output);
+                                true
+                            }
+                            ::core::task::Poll::Pending => false,
                         }
-                        ::core::task::Poll::Pending => false,
+                    } else {
+                        false
                     }
                 },
-                JoinMeMaybeArmKind::FutureAndBody { pattern, body, .. } => quote! {
-                    match ::core::future::Future::poll(#arm_name.as_mut(), cx) {
-                        ::core::task::Poll::Ready(#poll_output) => {
-                            #arm_output = ::core::option::Option::Some((|#pattern| {
-                                #cancellermuts
-                                #body
-                            })(#poll_output));
-                            true
+                ArmKind::FutureAndBody { .. } => quote! {
+                    if let Some(future) = #arm_name.as_mut() {
+                        let pinned = unsafe { ::core::pin::Pin::new_unchecked(future) };
+                        match ::join_me_maybe::_impl::PollOnce(pinned).await {
+                            ::core::task::Poll::Ready(item) => {
+                                #arm_name = None;
+                                #arm_item = ::core::option::Option::Some(item);
+                                true
+                            }
+                            ::core::task::Poll::Pending => false,
                         }
-                        ::core::task::Poll::Pending => false,
+                    } else {
+                        false
                     }
                 },
-                JoinMeMaybeArmKind::StreamAndBody {
-                    pattern,
-                    body,
-                    finally,
-                    ..
-                } => {
-                    let finally = if let Some(finally) = finally {
+                ArmKind::StreamAndBody { finally, .. } => {
+                    let set_should_run_finally = if finally.is_some() {
                         quote! {
-                            #arm_output = ::core::option::Option::Some((|| {
-                                #cancellermuts
-                                #finally
-                            })());
+                            #arm_should_run_finally = true;
                         }
                     } else {
                         quote! {}
                     };
                     quote! {
-                        loop {
-                            match ::futures::Stream::poll_next(#arm_name.as_mut(), cx) {
-                                ::core::task::Poll::Ready(::core::option::Option::Some(#poll_output)) => {
-                                    (|#pattern| -> () {
-                                        #cancellermuts
-                                        #body
-                                    })(#poll_output);
+                        if let Some(stream) = #arm_name.as_mut() {
+                            let pinned = unsafe { ::core::pin::Pin::new_unchecked(stream) };
+                            match ::join_me_maybe::_impl::PollNextOnce(pinned).await {
+                                ::core::task::Poll::Ready(Some(item)) => {
+                                    // The has yielded an item, which needs to be consumed by the body.
+                                    // We're returning `false` here, because the stream isn't finished,
+                                    // but note that we haven't registered a wakeup. If the body
+                                    // closure consumes this item, it will rerun the whole top-level
+                                    // loop, to give us a chance to poll this stream again. See
+                                    // `#item_consumed_from_live_stream`.
+                                    #arm_item = ::core::option::Option::Some(item);
+                                    false
                                 }
-                                ::core::task::Poll::Ready(::core::option::Option::None) => {
-                                    #finally
-                                    break true;
+                                ::core::task::Poll::Ready(None) => {
+                                    // The stream is finished.
+                                    #arm_name = None;
+                                    #set_should_run_finally
+                                    true
                                 }
-                                ::core::task::Poll::Pending => break false,
+                                ::core::task::Poll::Pending => false,
                             }
+                        } else {
+                            false
                         }
                     }
                 }
@@ -304,7 +414,7 @@ impl ToTokens for JoinMeMaybe {
                 // This "definitely" future can't be cancelled, so we can unconditionally bump the
                 // count when it exits.
                 polling_and_counting.extend(quote! {
-                    if !#arm_name.is_done() && #poll_is_ready {
+                    if #poll_is_ready {
                         #definitely_finished_count.store(
                             #definitely_finished_count.load(::core::sync::atomic::Ordering::Relaxed) + 1,
                             ::core::sync::atomic::Ordering::Relaxed,
@@ -313,7 +423,8 @@ impl ToTokens for JoinMeMaybe {
                 });
             }
             polling_and_counting.extend(quote! {
-                if #definitely_finished_count.load(::core::sync::atomic::Ordering::Relaxed) == #total_definitely {
+                if #scrutinees_finished {
+                    // Not a real loop break, just a skip-the-rest jump.
                     break;
                 }
             });
@@ -324,26 +435,139 @@ impl ToTokens for JoinMeMaybe {
         // *dropped promptly*. Consider a case where one arm is holding an async lock, and another
         // arm is trying to acquire it. If the first arm is cancelled but not dropped, then the
         // second arm will deadlock. See "Futurelock": https://rfd.shared.oxide.computer/rfd/0609.
-        let mut cancelling = TokenStream2::new();
+        let mut cancel_all = TokenStream2::new();
+        let mut cancel_labeled = TokenStream2::new();
         for ((arm, arm_name), finished_flag) in
             self.arms.iter().zip(&arm_names).zip(&finished_flag_names)
         {
+            cancel_all.extend(quote! {
+                #arm_name = None;
+            });
             if arm.cancel_label.is_some() {
-                cancelling.extend(quote! {
+                cancel_labeled.extend(quote! {
                     if #finished_flag.load(::core::sync::atomic::Ordering::Relaxed) {
-                        // No effect if the future is already finished.
-                        #arm_name.as_mut().cancel();
+                        #arm_name = None;
                     }
                 });
             }
+        }
+        let cancelling = quote! {
+            if #scrutinees_finished {
+                #cancel_all
+            } else {
+                #cancel_labeled
+            }
+        };
+
+        // The run bodies loop. As long as there are items available, and we don't have an existing
+        // `#run_body_future` that's returned `Pending`, keep trying to consume items.
+        let mut try_to_call_run_body = TokenStream2::new();
+        let mut handle_body_output_arms = TokenStream2::new();
+        // We need to keep looping without returning `Pending` if running bodies might've unblocked
+        // some of the scrutinees. This can happen when an item is consumed from a stream.
+        let item_consumed_from_live_stream =
+            format_ident!("item_consumed_from_live_stream", span = Span::mixed_site());
+        for i in 0..self.arms.len() {
+            let arm = &self.arms[i];
+            let arm_name = &arm_names[i];
+            let arm_item = &arm_items[i];
+            let arm_output = &arm_outputs[i];
+            if let ArmKind::FutureAndBody { .. } = &arm.kind {
+                let variant_name = format_ident!("Arm{i}");
+                try_to_call_run_body.extend(quote! {
+                    if let Some(item) = #arm_item.take() {
+                        // Drop-then-assign means that the old value and the new value don't
+                        // overlap, which actually isn't the case for simple assignment (because
+                        // the compiler has to be defensive about panics). This is necessary when
+                        // the body closure 1) is mutating / AsyncFnMut and 2) needs Drop.
+                        drop(#run_body_future);
+                        #run_body_future = Some(#run_body_fn(
+                            #private_module_name::ArmsInput::#variant_name(item)
+                        ));
+                        continue; // Loop again to poll this.
+                    }
+                });
+                handle_body_output_arms.extend(quote! {
+                    #private_module_name::ArmsOutput::#variant_name(output) => {
+                        #arm_output = ::core::option::Option::Some(output);
+                    }
+                });
+            }
+            if let ArmKind::StreamAndBody { finally, .. } = &arm.kind {
+                let variant_name = format_ident!("Arm{i}");
+                try_to_call_run_body.extend(quote! {
+                    if let Some(item) = #arm_item.take() {
+                        // See above about `drop`.
+                        drop(#run_body_future);
+                        #run_body_future = Some(#run_body_fn(
+                            #private_module_name::ArmsInput::#variant_name(item)
+                        ));
+                        if #arm_name.is_some() {
+                            #item_consumed_from_live_stream = true;
+                        }
+                        continue; // Loop again to poll this.
+                    }
+                });
+                handle_body_output_arms.extend(quote! {
+                    #private_module_name::ArmsOutput::#variant_name => {}
+                });
+                if finally.is_some() {
+                    let variant_name = format_ident!("Arm{i}Finally");
+                    let arm_should_run_finally = &should_run_finally_flag_names[i];
+                    try_to_call_run_body.extend(quote! {
+                        // Note that we just checked `#arm_item` above.
+                        if #arm_should_run_finally {
+                            // See above about `drop`.
+                            drop(#run_body_future);
+                            #run_body_future = Some(#run_body_fn(
+                                #private_module_name::ArmsInput::#variant_name
+                            ));
+                            #arm_should_run_finally = false;
+                            continue; // Loop again to poll this.
+                        }
+                    });
+                    handle_body_output_arms.extend(quote! {
+                        #private_module_name::ArmsOutput::#variant_name(output) => {
+                            #arm_output = ::core::option::Option::Some(output);
+                        }
+                    });
+                }
+            }
+        }
+        let mut run_bodies_loop = TokenStream2::new();
+        if has_bodies {
+            run_bodies_loop.extend(quote! {
+                loop {
+                    if let Some(future) = #run_body_future.as_mut() {
+                        let poll = ::join_me_maybe::_impl::PollOnce(unsafe {
+                            ::core::pin::Pin::new_unchecked(future)
+                        }).await;
+                        if let ::core::task::Poll::Ready(output) = poll {
+                            // See above about `drop`.
+                            drop(#run_body_future);
+                            #run_body_future = None;
+                            match output {
+                                #handle_body_output_arms
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    #try_to_call_run_body
+                    if #run_body_future.is_none() {
+                        // There are no more items.
+                        break;
+                    }
+                }
+            });
         }
 
         let mut return_values = TokenStream2::new();
         for (arm, arm_output) in self.arms.iter().zip(&arm_outputs) {
             match &arm.kind {
-                JoinMeMaybeArmKind::FutureOnly { .. }
-                | JoinMeMaybeArmKind::FutureAndBody { .. }
-                | JoinMeMaybeArmKind::StreamAndBody {
+                ArmKind::FutureOnly { .. }
+                | ArmKind::FutureAndBody { .. }
+                | ArmKind::StreamAndBody {
                     finally: Some(_), ..
                 } => {
                     if arm.is_maybe || arm.cancel_label.is_some() {
@@ -359,28 +583,46 @@ impl ToTokens for JoinMeMaybe {
                     }
                 }
                 // Streams without `finally`, don't return anything.
-                JoinMeMaybeArmKind::StreamAndBody { finally: None, .. } => {
+                ArmKind::StreamAndBody { finally: None, .. } => {
                     return_values.extend(quote! { (), })
                 }
             }
         }
 
+        let finished_check = if has_bodies {
+            quote! { #scrutinees_finished && #run_body_future.is_none() }
+        } else {
+            quote! { #scrutinees_finished }
+        };
         tokens.extend(quote! {
             {
                 #initializers
-                ::core::future::poll_fn(|cx| {
-                    // Not really a loop, just a way to short-circuit with `break`.
-                    loop {
-                        #polling_and_counting
-                        // Polling above might `break` and skip cancelling. That's fine, because
-                        // everything drops after we return `Ready`.
+                #run_body_tokens
+                loop {
+                    if !#scrutinees_finished {
+                        // Not really another loop, just a way to short-circuit polling with `break` if all
+                        // the "definitely" atrms finish in the middle.
+                        loop {
+                            #polling_and_counting
+                            break;
+                        }
                         #cancelling
-                        // If we don't `break` during polling, we exit here.
-                        return ::core::task::Poll::Pending;
                     }
-                    // If we `break` during polling, we exit here.
-                    ::core::task::Poll::Ready((#return_values))
-                }).await
+                    let mut #item_consumed_from_live_stream = false;
+                    #run_bodies_loop
+                    if #finished_check {
+                        // We are DONE!
+                        break (#return_values);
+                    } else if #scrutinees_finished || !#item_consumed_from_live_stream {
+                        // If running bodies didn't unblock any of the scrutinees (either because
+                        // we're done running them, or because no items were consumed from any
+                        // streams), then we can't make further progress right now, and we need to
+                        // yield.
+                        ::futures::pending!();
+                    }
+                    // Loop again (either immediately, if we've potentially unblocked a scrutinee,
+                    // or after being woken up, if we just yielded).
+                }
             }
         });
     }

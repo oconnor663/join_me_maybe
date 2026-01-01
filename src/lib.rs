@@ -384,47 +384,12 @@ impl<'a> Canceller<'a> {
     }
 }
 
-/// Like `Canceller`, but in scope for `=>` expressions/blocks with mutable access the environment
-///
-/// In addition to the `.cancel()` method, this type provides `.as_pin_mut()` for accessing the
-/// underlying future or stream. This feature is highly experimental. The main intended use case is
-/// streams like [`FuturesUnordered`], which let you add more work dynamically. This makes it
-/// possible for one arm of `join!` to add more work to another arm.
-///
-/// However, note that `join!` drops futures and streams after they return `Ready`/`Ready(None)`
-/// (or when they're cancelled), while `FuturesUnordered` often return `Ready(None)` temporarily
-/// until it's later refilled. In my opinion, this makes `FuturesUnordered` a "poorly behaved"
-/// stream. In practice it's almost always polled with `select!`-in-a-loop, which has the
-/// interesting property of re-polling all arms whenever any arm returns non-`Pending`. (Maybe more
-/// intuitively, it only returns `Pending` when all arms are `Pending`.) On the other hand, `join!`
-/// (currently) effectively re-polls all arms whenever any arm *requests a wakeup*, so you really
-/// need adding work itself to trigger a wakeup.
-///
-/// [`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
-pub struct CancellerMut<'a, 'b, T> {
-    canceller: &'a Canceller<'a>,
-    inner: Option<Pin<&'b mut T>>,
-}
-
-impl<'a, 'b, T> CancellerMut<'a, 'b, T> {
-    #[inline]
-    pub fn cancel(&self) {
-        self.canceller.cancel();
-    }
-
-    #[inline]
-    pub fn as_pin_mut(&mut self) -> Option<Pin<&mut T>> {
-        self.inner.as_mut().map(|p| p.as_mut())
-    }
-}
-
 /// Functions that are only intended for use by the macro
 #[doc(hidden)]
 pub mod _impl {
     use super::*;
     use core::task::{Context, Poll};
-    use futures::Stream;
-    use pin_project_lite::pin_project;
+    use futures::{FutureExt, Stream, StreamExt};
 
     #[inline]
     pub fn new_definitely_canceller<'a>(
@@ -445,100 +410,25 @@ pub mod _impl {
         }
     }
 
-    #[inline]
-    pub fn new_canceller_mut<'a, 'b, T>(
-        canceller: &'a Canceller,
-        inner: Option<Pin<&'b mut T>>,
-    ) -> CancellerMut<'a, 'b, T> {
-        CancellerMut { canceller, inner }
-    }
+    // `futures` has `poll!`, but it doesn't have a stream version. The macros is also kind of
+    // gross, so just adapt it into a couple wrapper structs
+    pub struct PollOnce<Fut: Future + Unpin>(pub Fut);
 
-    pub fn fuse_future<Fut>(fut: Fut) -> FuseFuture<Fut> {
-        FuseFuture { inner: Some(fut) }
-    }
+    impl<Fut: Future + Unpin> Future for PollOnce<Fut> {
+        type Output = Poll<Fut::Output>;
 
-    // We can't use `futures::future::Fuse`, because it doesn't expose the inner future.
-    pin_project! {
-        pub struct FuseFuture<Fut> {
-            #[pin]
-            inner: Option<Fut>,
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            Poll::Ready(self.0.poll_unpin(cx))
         }
     }
 
-    impl<Fut> FuseFuture<Fut> {
-        pub fn is_done(&self) -> bool {
-            self.inner.is_none()
-        }
+    pub struct PollNextOnce<S: Stream + Unpin>(pub S);
 
-        pub fn get_pin_mut(self: Pin<&mut Self>) -> Option<Pin<&mut Fut>> {
-            self.project().inner.as_pin_mut()
-        }
+    impl<S: Stream + Unpin> Future for PollNextOnce<S> {
+        type Output = Poll<Option<S::Item>>;
 
-        pub fn cancel(self: Pin<&mut Self>) {
-            self.project().inner.set(None);
-        }
-    }
-
-    impl<Fut: Future> Future for FuseFuture<Fut> {
-        type Output = Fut::Output;
-
-        #[inline]
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Fut::Output> {
-            match self.as_mut().project().inner.as_pin_mut() {
-                Some(fut) => fut.poll(cx).map(|output| {
-                    self.project().inner.set(None);
-                    output
-                }),
-                None => Poll::Pending,
-            }
-        }
-    }
-
-    pub fn fuse_stream<S>(stream: S) -> FuseStream<S> {
-        FuseStream {
-            inner: Some(stream),
-        }
-    }
-
-    // We could use `futures::stream::Stream`, because it does expose the inner stream, but it
-    // doesn't drop the inner stream the way the future version does.
-    pin_project! {
-        pub struct FuseStream<S> {
-            #[pin]
-            inner: Option<S>,
-        }
-    }
-
-    impl<S> FuseStream<S> {
-        pub fn is_done(&self) -> bool {
-            self.inner.is_none()
-        }
-
-        pub fn get_pin_mut(self: Pin<&mut Self>) -> Option<Pin<&mut S>> {
-            self.project().inner.as_pin_mut()
-        }
-
-        pub fn cancel(self: Pin<&mut Self>) {
-            self.project().inner.set(None);
-        }
-    }
-
-    impl<S: Stream> Stream for FuseStream<S> {
-        type Item = S::Item;
-
-        #[inline]
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
-            match self.as_mut().project().inner.as_pin_mut() {
-                Some(stream) => match stream.poll_next(cx) {
-                    Poll::Ready(Some(item)) => Poll::Ready(Some(item)),
-                    Poll::Ready(None) => {
-                        self.project().inner.set(None);
-                        Poll::Ready(None)
-                    }
-                    Poll::Pending => Poll::Pending,
-                },
-                None => Poll::Ready(None),
-            }
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            Poll::Ready(self.0.poll_next_unpin(cx))
         }
     }
 }
