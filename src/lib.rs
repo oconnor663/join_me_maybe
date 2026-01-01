@@ -240,6 +240,64 @@
 //! [`StreamMap`]: https://docs.rs/tokio-stream/latest/tokio_stream/struct.StreamMap.html
 //! [usual rule]: https://docs.rs/futures/latest/futures/stream/trait.Stream.html#tymethod.poll_next
 //! [adapter]: https://github.com/oconnor663/join_me_maybe/blob/672c615cd586140e09052a83795ccc291c0a31c8/tests/test.rs#L180-L327
+//!
+//! # Help needed! (from the compiler...)
+//!
+//! As far as I know, there's no way for the `join!` macro to support something like this today:
+//!
+//! ```rust,compile_fail
+//! # #[tokio::main]
+//! # async fn main() {
+//! # use join_me_maybe::join;
+//! # use tokio::time::{sleep, Duration};
+//! let mut x = 0;
+//! join!(
+//!     async { x += 1; },
+//!     async { x += 1; }, // error: cannot borrow `x` as mutable more than once at a time
+//! );
+//! assert_eq!(x, 2);
+//! # }
+//! ```
+//!
+//! The problem is that both futures want to capture `&mut x`, which violates the mutable aliasing
+//! rule. However, that arguably borrows too much. Consider:
+//!
+//! 1. Neither of these futures tries to hold `&mut x` across an `.await` point. In other words,
+//!    the borrow checker would accept any interleaving of their "basic blocks" in a
+//!    single-threaded context.
+//! 2. They're hidden inside the join future, so we can't yeet one of them off to another thread to
+//!    create a data race.
+//!
+//! Instead of each inner future capturing `&mut x`, the outer join future could capture it once,
+//! and the inner futures could "reborrow" it in some sense when they're polled. My guess is that
+//! there's no practical way for a macro to express this in Rust today (corrections welcome!), but
+//! the Rust compiler could add a hypothetical syntax like this:
+//!
+//! ```rust,ignore
+//! let mut x = 0;
+//! let mut y = 0;
+//! concurrent_bikeshed {
+//!     {
+//!         // `x` is not borrowed across the `.await`...
+//!         x += 1;
+//!         // ...but `y` is.
+//!         let y_ref = &mut y;
+//!         sleep(Duration::from_secs(1)).await;
+//!         *y_ref += 1;
+//!         x += 1;
+//!     },
+//!     {
+//!         // Mutating `x` here does not conflict...
+//!         x += 1;
+//!         // ...but trying to mutate `y` here would conflict.
+//!         // y += 1;
+//!     },
+//! }
+//! ```
+//!
+//! Another big advantage of adding dedicated syntax for this is that it could support
+//! `return`/`break`/`continue` as usual to diverge from inside any arm. That would be especially
+//! helpful for error handling with `?`, which is awkward in concurrent contexts today.
 
 #![no_std]
 
