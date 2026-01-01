@@ -1,18 +1,10 @@
-error: unexpected end of input, At least one arm must be `definitely`
- --> tests/ui/all_maybe.rs:6:5
+error: unexpected end of input, a `join!` with only `maybe` arms returns immediately and executes nothing
+ --> tests/ui/all_maybe.rs:5:5
   |
-6 | /     join!(
-7 | |         maybe ready(1),
-8 | |         maybe ready(2),
-9 | |     );
+5 | /     join!(
+6 | |         maybe std::future::ready(1),
+7 | |         maybe std::future::ready(2),
+8 | |     );
   | |_____^
   |
   = note: this error originates in the macro `join` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-warning: unused import: `std::future::ready`
- --> tests/ui/all_maybe.rs:2:5
-  |
-2 | use std::future::ready;
-  |     ^^^^^^^^^^^^^^^^^^
-  |
-  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

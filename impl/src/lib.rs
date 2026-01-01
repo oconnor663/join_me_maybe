@@ -122,7 +122,9 @@ impl Parse for JoinMeMaybe {
             }
         }
         if arms.iter().all(|arm| arm.is_maybe) {
-            return Err(input.error("At least one arm must be `definitely`"));
+            return Err(input.error(
+                "a `join!` with only `maybe` arms returns immediately and executes nothing",
+            ));
         }
         Ok(Self { arms })
     }
