@@ -151,7 +151,7 @@ impl ToTokens for JoinMeMaybe {
             .collect();
         // Parens are generally necessary here (e.g. for negation) even though the spots where
         // they're unnecessary generate a bunch of warnings in expanded code.
-        let scrutinees_finished = quote! {
+        let definitely_finished = quote! {
             (#definitely_finished_count.load(::core::sync::atomic::Ordering::Relaxed) == #total_definitely)
         };
         for i in 0..self.arms.len() {
@@ -392,6 +392,20 @@ impl ToTokens for JoinMeMaybe {
                     }
                 }
             };
+            let future_or_stream = match &arm.kind {
+                ArmKind::FutureOnly { .. } | ArmKind::FutureAndBody { .. } => {
+                    format_ident!("future", span = Span::mixed_site())
+                }
+                ArmKind::StreamAndBody { .. } => format_ident!("stream", span = Span::mixed_site()),
+            };
+            // *Always* check the definitely count after each poll, because in general any branch
+            // could cancel any other.
+            let check_definitely_finished = quote! {
+                if #definitely_finished {
+                    // Not a real loop break, just a skip-the-rest jump.
+                    break;
+                }
+            };
             if let Some(label) = &arm.cancel_label {
                 // If this is a "definitely" future/stream, we need to bump the finished count
                 // after it exits, but we don't want to do that unconditionally. The future
@@ -399,35 +413,38 @@ impl ToTokens for JoinMeMaybe {
                 // bumped the count. Calling `cancel` again has no effect on the output but keeps
                 // the count consistent.
                 polling_and_counting.extend(quote! {
-                    if !#finished_flag.load(::core::sync::atomic::Ordering::Relaxed) {
-                        if #poll_is_ready {
+                    if let Some(#future_or_stream) = #arm_name.as_mut() && !#finished_flag.load(::core::sync::atomic::Ordering::Relaxed) {
+                        let is_ready = #poll_is_ready;
+                        if is_ready {
                             #label.cancel();
                         }
+                        #check_definitely_finished
                     }
                 });
             } else if arm.is_maybe {
                 // This is a `maybe` future without a finished/cancelled flag.
                 polling_and_counting.extend(quote! {
-                    _ = #poll_is_ready;
+                    if let Some(#future_or_stream) = #arm_name.as_mut() {
+                        _ = #poll_is_ready;
+                        #check_definitely_finished
+                    }
                 });
             } else {
                 // This "definitely" future can't be cancelled, so we can unconditionally bump the
                 // count when it exits.
                 polling_and_counting.extend(quote! {
-                    if #poll_is_ready {
-                        #definitely_finished_count.store(
-                            #definitely_finished_count.load(::core::sync::atomic::Ordering::Relaxed) + 1,
-                            ::core::sync::atomic::Ordering::Relaxed,
-                        );
+                    if let Some(#future_or_stream) = #arm_name.as_mut() {
+                        let is_ready = #poll_is_ready;
+                        if is_ready {
+                            #definitely_finished_count.store(
+                                #definitely_finished_count.load(::core::sync::atomic::Ordering::Relaxed) + 1,
+                                ::core::sync::atomic::Ordering::Relaxed,
+                            );
+                        }
+                        #check_definitely_finished
                     }
                 });
             }
-            polling_and_counting.extend(quote! {
-                if #scrutinees_finished {
-                    // Not a real loop break, just a skip-the-rest jump.
-                    break;
-                }
-            });
         }
 
         // When a future gets cancelled, that means two thing. First, the obvious one, it shouldn't
@@ -452,7 +469,7 @@ impl ToTokens for JoinMeMaybe {
             }
         }
         let cancelling = quote! {
-            if #scrutinees_finished {
+            if #definitely_finished {
                 #cancel_all
             } else {
                 #cancel_labeled
@@ -590,16 +607,16 @@ impl ToTokens for JoinMeMaybe {
         }
 
         let finished_check = if has_bodies {
-            quote! { #scrutinees_finished && #run_body_future.is_none() }
+            quote! { #definitely_finished && #run_body_future.is_none() }
         } else {
-            quote! { #scrutinees_finished }
+            quote! { #definitely_finished }
         };
         tokens.extend(quote! {
             {
                 #initializers
                 #run_body_tokens
                 loop {
-                    if !#scrutinees_finished {
+                    if !#definitely_finished {
                         // Not really another loop, just a way to short-circuit polling with `break` if all
                         // the "definitely" atrms finish in the middle.
                         loop {
@@ -613,7 +630,7 @@ impl ToTokens for JoinMeMaybe {
                     if #finished_check {
                         // We are DONE!
                         break (#return_values);
-                    } else if #scrutinees_finished || !#item_consumed_from_live_stream {
+                    } else if #definitely_finished || !#item_consumed_from_live_stream {
                         // If running bodies didn't unblock any of the scrutinees (either because
                         // we're done running them, or because no items were consumed from any
                         // streams), then we can't make further progress right now, and we need to
