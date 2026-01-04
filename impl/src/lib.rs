@@ -162,16 +162,16 @@ impl ToTokens for JoinMeMaybe {
                 });
                 if self.arms[i].is_maybe {
                     initializers.extend(quote! {
-                        let #label = ::join_me_maybe::_impl::new_maybe_canceller(
+                        let #label = ::core::pin::pin!(::join_me_maybe::_impl::new_maybe_canceller(
                             &#flag_name,
-                        );
+                        ));
                     });
                 } else {
                     initializers.extend(quote! {
-                        let #label = ::join_me_maybe::_impl::new_definitely_canceller(
+                        let #label = ::core::pin::pin!(::join_me_maybe::_impl::new_definitely_canceller(
                             &#flag_name,
                             &#definitely_finished_count,
-                        );
+                        ));
                     });
                 }
             }
