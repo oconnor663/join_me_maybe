@@ -1,0 +1,5 @@
+error: the label `repeated` is used more than once
+ --> tests/ui/repeat_labels.rs:8:9
+  |
+8 |         repeated: std::future::ready(3),
+  |         ^^^^^^^^

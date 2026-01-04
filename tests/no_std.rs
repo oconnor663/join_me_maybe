@@ -13,7 +13,6 @@ pub async fn foo() {
         cancel1: _ = ready(2) => (),
         cancel2: maybe async {
             cancel1.cancel();
-            cancel2.cancel();
         },
         _ in stream::iter([3, 4, 5]) => (),
     );

@@ -1,0 +1,5 @@
+error[E0425]: cannot find value `foo` in this scope
+  --> tests/ui/cancel_self.rs:12:13
+   |
+12 |             foo.cancel();
+   |             ^^^ not found in this scope

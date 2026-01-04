@@ -12,6 +12,7 @@ edition = "2024"
 [dependencies]
 join_me_maybe_impl = { version = "0.3", path = "impl" }
 futures = { version = "0.3.31", default-features = false }
+atomic_refcell = "0.1.13"
 
 [dev-dependencies]
 futures = { version = "0.3" } # with default features, for `FuturesUnordered`
