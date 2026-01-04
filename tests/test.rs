@@ -362,3 +362,22 @@ async fn test_await_in_bodies() {
     );
     assert_eq!(ret, (42, 111));
 }
+
+#[tokio::test]
+async fn test_return_in_bodies() {
+    fn io_fail() -> std::io::Result<i32> {
+        // Normally I'd just try to open /nonexistent.txt or something, but this plays more nicely
+        // with Miri.
+        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "fail!!!"))
+    }
+    async fn foo() -> std::io::Result<()> {
+        join!(
+            sleep(Duration::from_secs(1_000_000)),
+            _ = sleep(Duration::from_millis(10)) => {
+                io_fail()?;
+            }
+        );
+        Ok(())
+    }
+    assert!(foo().await.is_err());
+}
