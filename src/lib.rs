@@ -445,6 +445,12 @@ impl<'a, T> Canceller<'a, T> {
     }
 }
 
+impl<'a, T> core::fmt::Debug for Canceller<'a, T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Canceller").finish_non_exhaustive()
+    }
+}
+
 /// Functions that are only intended for use by the macro
 #[doc(hidden)]
 pub mod _impl {
