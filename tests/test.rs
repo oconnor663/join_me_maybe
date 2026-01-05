@@ -421,3 +421,18 @@ async fn test_with_pin_mut_panic() {
         },
     );
 }
+
+// This test looks really stupid, but it actually fails to compile ("borrowed value does not live
+// long enough") if canceller references don't outlive the futures that capture them. The problem
+// is that non-move async blocks will automatically capture `Copy` types by value *except* when
+// they're used in a generic context. It's pretty confusing.
+#[tokio::test]
+async fn test_manipulate_canceller_generically() {
+    fn do_something<T>(_: T) {}
+    join!(
+        foo: sleep(Duration::from_millis(1)),
+        async {
+            do_something(foo);
+        },
+    );
+}
