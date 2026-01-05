@@ -431,7 +431,7 @@ impl ToTokens for JoinMeMaybe {
                     ::core::future::pending().await
                 };
                 // XXX: Morally we should `pin!` this. However, if we do, then we won't be able to
-                // `drop()` it. We need explicit drops below so that the new body future doens't
+                // `drop()` it. We need explicit drops below so that the new body future doesn't
                 // overlap in time with the old one. (With simple assignment, they do overlap,
                 // because the compiler needs to be defensive about panics.) This is necessary when
                 // the body closure 1) is mutating / AsyncFnMut and 2) needs Drop.
@@ -606,6 +606,13 @@ impl ToTokens for JoinMeMaybe {
                         // overlap, which actually isn't the case for simple assignment (because
                         // the compiler has to be defensive about panics). This is necessary when
                         // the body closure 1) is mutating / AsyncFnMut and 2) needs Drop.
+                        // SAFETY: We are using `Pin::new_unchecked` with this value, so we're
+                        // morally obligated to drop it in-place. Calling `drop()` technically
+                        // moves the value into drop, which isn't allowed, even though the compiler
+                        // almost certainly elides the move. Instead of relying on that, explicitly
+                        // overwrite the value with `None` first, even though it feels redundant.
+                        // (In summary, `... = None` is for soundness, and `drop` is for borrowck.)
+                        #run_body_future = None;
                         drop(#run_body_future);
                         #run_body_future = Some(#run_body_fn(
                             #private_module_name::ArmsInput::#variant_name(item),
@@ -630,7 +637,8 @@ impl ToTokens for JoinMeMaybe {
                 };
                 try_to_call_run_body.extend(quote! {
                     if let Some(item) = #arm_item.take() {
-                        // See above about `drop`.
+                        // SAFETY: See above about `None` and `drop`.
+                        #run_body_future = None;
                         drop(#run_body_future);
                         #run_body_future = Some(#run_body_fn(
                             #private_module_name::ArmsInput::#variant_name(item),
@@ -651,7 +659,8 @@ impl ToTokens for JoinMeMaybe {
                     try_to_call_run_body.extend(quote! {
                         // Note that we just checked `#arm_item` above.
                         if #arm_should_run_finally {
-                            // See above about `drop`.
+                            // SAFETY: See above about `None` and `drop`.
+                            #run_body_future = None;
                             drop(#run_body_future);
                             #run_body_future = Some(#run_body_fn(
                                 #private_module_name::ArmsInput::#variant_name,
@@ -689,7 +698,11 @@ impl ToTokens for JoinMeMaybe {
                             // `#run_body_enum_output`, and then proceed with this loop to try to
                             // run more bodies.
                             #run_body_no_return.store(false, ::core::sync::atomic::Ordering::Relaxed);
-                            drop(#run_body_future); // See above about `drop`.
+                            // SAFETY: See above about `None` and `drop`. This time we need a
+                            // *second* `None` assignment, so that this variable is always
+                            // initialized at the top of the loop.
+                            #run_body_future = None;
+                            drop(#run_body_future);
                             #run_body_future = None;
                             match #run_body_enum_output.take().expect("output was set right before the flag") {
                                 #handle_body_output_arms
@@ -750,7 +763,7 @@ impl ToTokens for JoinMeMaybe {
                 loop {
                     if !#definitely_finished {
                         // Not really another loop, just a way to short-circuit polling with `break` if all
-                        // the "definitely" atrms finish in the middle.
+                        // the "definitely" arms finish in the middle.
                         loop {
                             #polling_and_counting
                             break;
