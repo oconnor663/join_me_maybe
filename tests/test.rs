@@ -4,6 +4,7 @@ use join_me_maybe::join;
 use std::future::ready;
 use std::hash::Hash;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::task::{Context, Poll, Waker};
 use tokio::time::{Duration, sleep};
 use tokio_stream::StreamMap;
@@ -373,4 +374,37 @@ async fn test_return_in_bodies() {
         Ok(())
     }
     assert!(foo().await.is_err());
+}
+
+#[tokio::test]
+async fn test_with_pin_mut_during_drop() {
+    static DROP_COUNT: AtomicU32 = AtomicU32::new(0);
+    struct Pathological<'a, T>(&'a join_me_maybe::Canceller<'a, T>);
+    impl<'a, T> Future for Pathological<'a, T> {
+        type Output = ();
+        fn poll(self: Pin<&mut Self>, _: &mut Context) -> Poll<Self::Output> {
+            // Just block forever.
+            Poll::Pending
+        }
+    }
+    impl<'a, T> Drop for Pathological<'a, T> {
+        fn drop(&mut self) {
+            self.0.with_pin_mut(|option| {
+                DROP_COUNT.fetch_add(1, Relaxed);
+                assert!(option.is_none(), "always None during drop");
+            });
+        }
+    }
+    async fn foo() {
+        join!(
+            foo: sleep(Duration::from_secs(1_000_000)),
+            Pathological(foo),
+            Pathological(bar),
+            bar: _ = sleep(Duration::from_millis(1)) => {
+                // Short-circuit to cause drop.
+                return;
+            }
+        );
+    }
+    foo().await;
 }
