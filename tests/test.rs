@@ -436,3 +436,15 @@ async fn test_manipulate_canceller_generically() {
         },
     );
 }
+
+#[tokio::test]
+async fn test_send_canceller() {
+    fn assert_send<T: Send>(_: &T) {}
+    join!(
+        foo: async {},
+        async {
+            // This should compile. See `ui/non_send_canceller.rs` for the failing case.
+            assert_send(&foo);
+        },
+    );
+}

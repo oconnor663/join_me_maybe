@@ -349,6 +349,7 @@
 #![no_std]
 
 use atomic_refcell::AtomicRefCell;
+use core::marker::PhantomData;
 use core::pin::Pin;
 use core::ptr;
 use core::sync::atomic::AtomicPtr;
@@ -384,6 +385,9 @@ pub struct Canceller<'a, T> {
     //    checks the finished flag and short-circuits if it's set, so no arm can observe any other
     //    during drop.
     inner_ptr: AtomicPtr<AtomicRefCell<Pin<&'a mut Option<T>>>>,
+    // Canceller should only be Send when T is Send, but AtomicPtr is unconditionally Send. Use
+    // PhantomData to make Canceller !Send when T is !Send.
+    _phantom: PhantomData<T>,
 }
 
 impl<'a, T> Canceller<'a, T> {
@@ -466,6 +470,7 @@ pub mod _impl {
             finished,
             definitely_count: Some(count),
             inner_ptr: AtomicPtr::new(ptr::null_mut()),
+            _phantom: PhantomData,
         }
     }
 
@@ -474,6 +479,7 @@ pub mod _impl {
             finished,
             definitely_count: None,
             inner_ptr: AtomicPtr::new(ptr::null_mut()),
+            _phantom: PhantomData,
         }
     }
 
