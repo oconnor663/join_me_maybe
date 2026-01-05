@@ -409,6 +409,11 @@ impl<'a, T> Canceller<'a, T> {
     /// duration of the provided closure. If the labeled arm has already finished or been
     /// cancelled, the closure receives `None` instead but still runs.
     ///
+    /// Internally, each labeled arm is owned by an [`AtomicRefCell`]. If you nest calls to
+    /// `with_pin_mut` and try to borrow the same arm twice, the second call will panic.
+    ///
+    /// [`AtomicRefCell`]: https://docs.rs/atomic_refcell/latest/atomic_refcell/struct.AtomicRefCell.html
+    ///
     /// Note that if you call this method from the `Drop` impl of your future or stream (you'll
     /// probably never do that, but your evil twin might), the closure will always receive `None`,
     /// regardless of the drop order of the arms. This is necessary to avoid dangling references.

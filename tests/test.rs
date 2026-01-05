@@ -408,3 +408,16 @@ async fn test_with_pin_mut_during_drop() {
     }
     foo().await;
 }
+
+#[tokio::test]
+#[should_panic = "already mutably borrowed"]
+async fn test_with_pin_mut_panic() {
+    join!(
+        foo: sleep(Duration::from_secs(1_000_000)),
+        async {
+            foo.with_pin_mut(|_| {
+                foo.with_pin_mut(|_| {});
+            });
+        },
+    );
+}
