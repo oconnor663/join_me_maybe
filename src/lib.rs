@@ -520,4 +520,11 @@ pub mod _impl {
             }
         }
     }
+
+    // A future that references its own `Canceller` breaks the build with an "infinit-size type"
+    // error, which is very confusing. We shadow self-cancellers with this type, in a desperate
+    // attempt to make the errors more self-explanatory. I would actually prefer not having
+    // self-cancellers in scope at all, but this creates different lifetime issues, and in practice
+    // we need to shadow them with something.
+    pub struct SelfCancellationIsNotSupported;
 }

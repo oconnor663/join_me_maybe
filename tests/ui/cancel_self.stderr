@@ -1,5 +1,5 @@
-error[E0425]: cannot find value `foo` in this scope
-  --> tests/ui/cancel_self.rs:12:13
+error[E0599]: no method named `cancel` found for struct `SelfCancellationIsNotSupported` in the current scope
+  --> tests/ui/cancel_self.rs:12:17
    |
 12 |             foo.cancel();
-   |             ^^^ not found in this scope
+   |                 ^^^^^^ method not found in `SelfCancellationIsNotSupported`

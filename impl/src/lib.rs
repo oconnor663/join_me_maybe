@@ -156,9 +156,6 @@ impl ToTokens for JoinMeMaybe {
         let finished_flag_names: Vec<_> = (0..self.arms.len())
             .map(|i| format_ident!("arm_{i}_finished", span = Span::mixed_site()))
             .collect();
-        let canceller_names: Vec<_> = (0..self.arms.len())
-            .map(|i| format_ident!("arm_{i}_canceller", span = Span::mixed_site()))
-            .collect();
         // We need a flag to differentiate "this stream finished and was dropped" from "this stream
         // was cancelled".
         let should_run_finally_flag_names: Vec<_> = (0..self.arms.len())
@@ -172,9 +169,8 @@ impl ToTokens for JoinMeMaybe {
         // For the drop guard below.
         let mut finished_flag_references = TokenStream2::new();
         for i in 0..self.arms.len() {
-            if self.arms[i].cancel_label.is_some() {
+            if let Some(label) = &self.arms[i].cancel_label {
                 let flag_name = &finished_flag_names[i];
-                let canceller_name = &canceller_names[i];
                 initializers.extend(quote! {
                     let #flag_name = ::core::sync::atomic::AtomicBool::new(false);
                 });
@@ -183,13 +179,13 @@ impl ToTokens for JoinMeMaybe {
                 });
                 if self.arms[i].is_maybe {
                     initializers.extend(quote! {
-                        let #canceller_name = ::join_me_maybe::_impl::new_maybe_canceller(
+                        let #label = &::join_me_maybe::_impl::new_maybe_canceller(
                             &#flag_name,
                         );
                     });
                 } else {
                     initializers.extend(quote! {
-                        let #canceller_name = ::join_me_maybe::_impl::new_definitely_canceller(
+                        let #label = &::join_me_maybe::_impl::new_definitely_canceller(
                             &#flag_name,
                             &#definitely_finished_count,
                         );
@@ -214,43 +210,28 @@ impl ToTokens for JoinMeMaybe {
             let arm_name = &arm_names[i];
             let arm_item = &arm_items[i];
             let arm_output = &arm_outputs[i];
-            // To avoid cyclic types (as opposed to cyclic references, which we have tons of here),
-            // each arm can see all the *other* arms' cancellers but not its own. If we didn't have
-            // the `with_pin_mut` method, we wouldn't have to worry about this. (Incidentally,
-            // `with_pin_mut` will always panic at `AtomicRefCell::borrow_mut` if a future tries to
-            // look at itself that way, but the type system doesn't care.)
-            let mut visible_cancellers = TokenStream2::new();
-            for j in 0..self.arms.len() {
-                if j != i
-                    && let Some(label) = &self.arms[j].cancel_label
-                {
-                    let canceller_name = &canceller_names[j];
-                    visible_cancellers.extend(quote! {
-                        #[allow(unused_variables)]
-                        let #label = &#canceller_name;
-                    });
-                }
-            }
             // All futures/streams get pinned in place, and inside an `Option` too so that we can
             // drop them. But labeled ones get further wrapped (i.e. the `Pin<&mut Option<T>>` is
             // wrapped) in an `AtomicRefCell`.
             let mut pin_and_wrap = |expr| {
-                let expr_with_cancellers = quote! {
-                    {
-                        #visible_cancellers
-                        #expr
-                    }
-                };
-                if self.arms[i].cancel_label.is_some() {
+                if let Some(label) = &self.arms[i].cancel_label {
                     arm_pins.push(quote! { #arm_name.borrow_mut() });
                     quote! {
-                        let #arm_name = ::core::pin::pin!(::core::option::Option::Some(#expr_with_cancellers));
+                        // Futures that capture their own `Canceller` create an "infinite size
+                        // type" error, because the `Canceller` is parametrized on the future type.
+                        // Shadowing the self-canceller with a verbosely-named dummy type is my
+                        // best attempt to make this discoverable.
+                        let #arm_name = ::core::pin::pin!(::core::option::Option::Some({
+                            #[allow(unused_variables)]
+                            let #label = ::join_me_maybe::_impl::SelfCancellationIsNotSupported;
+                            #expr
+                        }));
                         let #arm_name = ::atomic_refcell::AtomicRefCell::new(#arm_name);
                     }
                 } else {
                     arm_pins.push(quote! { #arm_name });
                     quote! {
-                        let mut #arm_name = ::core::pin::pin!(::core::option::Option::Some(#expr_with_cancellers));
+                        let mut #arm_name = ::core::pin::pin!(::core::option::Option::Some(#expr));
                     }
                 }
             };
@@ -292,11 +273,10 @@ impl ToTokens for JoinMeMaybe {
         // Populate the cancellers with references to the futures they cancel.
         let mut populate_calls = TokenStream2::new();
         for i in 0..self.arms.len() {
-            if self.arms[i].cancel_label.is_some() {
+            if let Some(label) = &self.arms[i].cancel_label {
                 let arm_name = &arm_names[i];
-                let canceller_name = &canceller_names[i];
                 populate_calls.extend(quote! {
-                    ::join_me_maybe::_impl::populate(&#canceller_name, &#arm_name);
+                    ::join_me_maybe::_impl::populate(#label, &#arm_name);
                 });
             }
         }
@@ -393,17 +373,6 @@ impl ToTokens for JoinMeMaybe {
         let run_body_enum_output = format_ident!("run_body_enum_output", span = Span::mixed_site());
         let mut run_body_tokens = TokenStream2::new();
         if has_bodies {
-            // Bodies can see all the cancellers.
-            let mut visible_cancellers = TokenStream2::new();
-            for i in 0..self.arms.len() {
-                if let Some(label) = &self.arms[i].cancel_label {
-                    let canceller_name = &canceller_names[i];
-                    visible_cancellers.extend(quote! {
-                        #[allow(unused_variables)]
-                        let #label = &#canceller_name;
-                    });
-                }
-            }
             let item = format_ident!("item", span = Span::mixed_site());
             run_body_tokens.extend(quote! {
                 mod #private_module_name {
@@ -417,7 +386,6 @@ impl ToTokens for JoinMeMaybe {
                 let #run_body_no_return = ::core::sync::atomic::AtomicBool::new(false);
                 let mut #run_body_enum_output = ::core::option::Option::None;
                 let mut #run_body_fn = async |#item, #run_body_enum_output: &mut ::core::option::Option<_>| {
-                    #visible_cancellers
                     *#run_body_enum_output = Some(match #item {
                         #bodies_match_arms
                     });
@@ -508,8 +476,7 @@ impl ToTokens for JoinMeMaybe {
                     break;
                 }
             };
-            if arm.cancel_label.is_some() {
-                let canceller_name = &canceller_names[i];
+            if let Some(label) = &arm.cancel_label {
                 polling_and_counting.extend(quote! {
                     if !#finished_flag.load(::core::sync::atomic::Ordering::Relaxed) {
                         let mut guard = #arm_name.borrow_mut();
@@ -525,7 +492,7 @@ impl ToTokens for JoinMeMaybe {
                             // exiting (pointlessly?) and already bumped the count. Calling
                             // `cancel` again has no effect on execution but keeps the count
                             // consistent. It's also how we set the finished flag.
-                            #canceller_name.cancel();
+                            #label.cancel();
                             guard.set(::core::option::Option::None);
                         }
                         #check_definitely_finished
