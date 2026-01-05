@@ -339,12 +339,20 @@ impl ToTokens for JoinMeMaybe {
                 has_bodies = true;
                 let param_name = format_ident!("T{i}");
                 let variant_name = format_ident!("Arm{i}");
+                let output_temporary = format_ident!("_output");
                 bodies_input_enum_generic_params.extend(quote! { #param_name, });
                 bodies_input_enum_variants.extend(quote! { #variant_name(#param_name), });
                 bodies_output_enum_generic_params.extend(quote! { #param_name, });
                 bodies_output_enum_variants.extend(quote! { #variant_name(#param_name), });
                 bodies_match_arms.extend(quote! {
-                    #private_module_name::ArmsInput::#variant_name(#pattern) => #private_module_name::ArmsOutput::#variant_name(#body),
+                    // Suppress unreachable code warnings if the #body returns.
+                    #private_module_name::ArmsInput::#variant_name(#pattern) => {
+                        let #output_temporary = {
+                            #body
+                        };
+                        #[allow(unreachable_code)]
+                        #private_module_name::ArmsOutput::#variant_name(#output_temporary)
+                    }
                 });
             }
             if let ArmKind::StreamAndBody {

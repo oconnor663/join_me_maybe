@@ -1,5 +1,3 @@
-#![deny(warnings)]
-
 use futures::stream;
 use join_me_maybe::join;
 

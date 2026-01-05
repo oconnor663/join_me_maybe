@@ -1,0 +1,15 @@
+error: unreachable statement
+  --> tests/ui/return_unreachable.rs:11:13
+   |
+ 9 |             return;
+   |             ------ any code following this expression is unreachable
+10 |             // This line should be an unreachable warning.
+11 |             println!();
+   |             ^^^^^^^^^^ unreachable statement
+   |
+note: the lint level is defined here
+  --> tests/ui/return_unreachable.rs:1:9
+   |
+ 1 | #![deny(unreachable_code)]
+   |         ^^^^^^^^^^^^^^^^
+   = note: this error originates in the macro `$crate::print` which comes from the expansion of the macro `println` (in Nightly builds, run with -Z macro-backtrace for more info)
