@@ -747,7 +747,7 @@ impl ToTokens for JoinMeMaybe {
                         // we're done running them, or because no items were consumed from any
                         // streams), then we can't make further progress right now, and we need to
                         // yield.
-                        ::futures::pending!();
+                        ::join_me_maybe::_impl::yield_once().await;
                     }
                     // Loop again (either immediately, if we've potentially unblocked a scrutinee,
                     // or after being woken up, if we just yielded).

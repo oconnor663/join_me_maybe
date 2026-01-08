@@ -533,4 +533,10 @@ pub mod _impl {
     // self-cancellers in scope at all, but this creates different lifetime issues, and in practice
     // we need to shadow them with something.
     pub struct SelfCancellationIsNotSupported;
+
+    // This is the only thing from `futures` that the macro needs internally. It's also annoying to
+    // deal with post-`cargo expand`. Just wrap it.
+    pub async fn yield_once() {
+        futures::pending!();
+    }
 }
