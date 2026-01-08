@@ -534,6 +534,9 @@ pub mod _impl {
     // we need to shadow them with something.
     pub struct SelfCancellationIsNotSupported;
 
+    // The macro needs `AtomicRefCell` internally.
+    pub use atomic_refcell::AtomicRefCell;
+
     // This is the only thing from `futures` that the macro needs internally. It's also annoying to
     // deal with post-`cargo expand`. Just wrap it.
     pub async fn yield_once() {

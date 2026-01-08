@@ -226,7 +226,7 @@ impl ToTokens for JoinMeMaybe {
                             let #label = ::join_me_maybe::_impl::SelfCancellationIsNotSupported;
                             #expr
                         }));
-                        let #arm_name = ::atomic_refcell::AtomicRefCell::new(#arm_name);
+                        let #arm_name = ::join_me_maybe::_impl::AtomicRefCell::new(#arm_name);
                     }
                 } else {
                     arm_pins.push(quote! { #arm_name });
