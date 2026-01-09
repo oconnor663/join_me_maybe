@@ -390,6 +390,11 @@ pub struct Canceller<'a, T> {
     _phantom: PhantomData<T>,
 }
 
+// SAFETY: Canceller is Sync whenever T is Send, for the same reason as std::sync::Mutex. These
+// types only hand out mutable references to the contents. If the contents are !Sync, those
+// references won't be able to escape the thread they wind up on for as long as they're alive.
+unsafe impl<'a, T: Send> Sync for Canceller<'a, T> {}
+
 impl<'a, T> Canceller<'a, T> {
     /// Cancel the corresponding labeled future or stream. It won't be polled again, and it'll be
     /// dropped promptly by the `join!` (though not directly within this method).

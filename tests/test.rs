@@ -448,3 +448,19 @@ async fn test_send_canceller() {
         },
     );
 }
+
+#[tokio::test]
+async fn test_canceller_is_sync_when_future_is_send() {
+    fn assert_sync<T: Sync>(_: &T) {}
+    join!(
+        foo: async {
+            let _x = std::cell::RefCell::new(());
+            sleep(Duration::from_millis(1)).await;
+            drop(_x);
+        },
+        async {
+            // This should compile. See `ui/non_send_canceller.rs` for the failing case.
+            assert_sync(&foo);
+        },
+    );
+}
