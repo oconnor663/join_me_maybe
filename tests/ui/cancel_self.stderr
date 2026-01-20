@@ -1,5 +1,0 @@
-error[E0599]: no method named `cancel` found for struct `SelfCancellationIsNotSupported` in the current scope
-  --> tests/ui/cancel_self.rs:12:17
-   |
-12 |             foo.cancel();
-   |                 ^^^^^^ method not found in `SelfCancellationIsNotSupported`

@@ -4,7 +4,6 @@ use join_me_maybe::join;
 use std::future::ready;
 use std::hash::Hash;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::task::{Context, Poll, Waker};
 use tokio::time::{Duration, sleep};
 use tokio_stream::StreamMap;
@@ -377,44 +376,11 @@ async fn test_return_in_bodies() {
 }
 
 #[tokio::test]
-async fn test_with_pin_mut_during_drop() {
-    static DROP_COUNT: AtomicU32 = AtomicU32::new(0);
-    struct Pathological<'a, T>(&'a join_me_maybe::Canceller<'a, T>);
-    impl<'a, T> Future for Pathological<'a, T> {
-        type Output = ();
-        fn poll(self: Pin<&mut Self>, _: &mut Context) -> Poll<Self::Output> {
-            // Just block forever.
-            Poll::Pending
-        }
-    }
-    impl<'a, T> Drop for Pathological<'a, T> {
-        fn drop(&mut self) {
-            self.0.with_pin_mut(|option| {
-                DROP_COUNT.fetch_add(1, Relaxed);
-                assert!(option.is_none(), "always None during drop");
-            });
-        }
-    }
-    async fn foo() {
-        join!(
-            foo: sleep(Duration::from_secs(1_000_000)),
-            Pathological(foo),
-            Pathological(bar),
-            bar: _ = sleep(Duration::from_millis(1)) => {
-                // Short-circuit to cause drop.
-                return;
-            }
-        );
-    }
-    foo().await;
-}
-
-#[tokio::test]
 #[should_panic = "already mutably borrowed"]
 async fn test_with_pin_mut_panic() {
     join!(
         foo: sleep(Duration::from_secs(1_000_000)),
-        async {
+        _ = async {} => {
             foo.with_pin_mut(|_| {
                 foo.with_pin_mut(|_| {});
             });
@@ -438,29 +404,75 @@ async fn test_manipulate_canceller_generically() {
 }
 
 #[tokio::test]
-async fn test_send_canceller() {
-    fn assert_send<T: Send>(_: &T) {}
+async fn test_canceller_send_sync_when_future_is_send() {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
     join!(
-        foo: async {},
-        async {
-            // This should compile. See `ui/non_send_canceller.rs` for the failing case.
-            assert_send(&foo);
+        foo: async {
+            // `RefCell` makes this future `!Sync`, but its cancellers are always `Send`.
+            let _x = std::cell::RefCell::new(());
+            sleep(Duration::from_millis(1)).await;
+            drop(_x);
+        },
+        _ = async {
+            assert_send_sync::<join_me_maybe::Canceller>(foo);
+        } => {
+            assert_send_sync::<join_me_maybe::CancellerMut<_>>(foo);
         },
     );
 }
 
 #[tokio::test]
-async fn test_canceller_is_sync_when_future_is_send() {
-    fn assert_sync<T: Sync>(_: &T) {}
+async fn test_canceller_send_sync_when_future_is_not_send() {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
     join!(
         foo: async {
-            let _x = std::cell::RefCell::new(());
+            // `Rc` makes this future `!Send`. The `Canceller` will still be `Send+Sync`, but not
+            // the `CancellerMut`. See `tests/ui/non_send_canceller.rs`.
+            let _x = std::rc::Rc::new(());
             sleep(Duration::from_millis(1)).await;
             drop(_x);
         },
         async {
-            // This should compile. See `ui/non_send_canceller.rs` for the failing case.
-            assert_sync(&foo);
+            assert_send_sync::<join_me_maybe::Canceller>(foo);
         },
     );
+}
+
+// This test covers some behavior, but it also just checks that this compiles and doesn't hit
+// "infinite size type" errors.
+#[tokio::test]
+async fn test_cancel_self() {
+    let mut did_write = false;
+    join!(
+        foo: async {
+            foo.cancel();
+            // Control still reaches here.
+            did_write = true;
+            sleep(Duration::from_secs(1_000_000)).await;
+        },
+    );
+    assert!(did_write);
+}
+
+// This test covers some behavior, but it also just checks that this compiles and doesn't hit
+// "infinite size type" errors.
+#[tokio::test]
+async fn test_circular_cancellation() {
+    let mut did_write1 = false;
+    let mut did_write2 = false;
+    join!(
+        foo: async {
+            bar.cancel();
+            sleep(Duration::from_millis(1)).await;
+            // Control still reaches here.
+            did_write1 = true;
+        },
+        bar: async {
+            // Control does not reach here.
+            foo.cancel();
+            did_write2 = true;
+        },
+    );
+    assert!(did_write1);
+    assert!(!did_write2);
 }

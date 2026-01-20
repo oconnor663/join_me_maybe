@@ -13,8 +13,11 @@ async fn main() {
             sleep(Duration::from_millis(1)).await;
             drop(_x);
         },
-        async {
-            // This should fail to compile.
+        _ = async {
+            // The `Canceller` is always `Send`.
+            assert_send(&foo);
+        } => {
+            // But the `CancellerMut` is not. This fails to compile.
             assert_send(&foo);
         },
     );

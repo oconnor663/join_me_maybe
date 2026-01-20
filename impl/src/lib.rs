@@ -119,6 +119,19 @@ impl Parse for JoinMeMaybe {
             arms.push(arm);
             // If there's any more input, require a trailing comma first.
             if !input.is_empty() {
+                // An error I've made before is to write something like this:
+                // ```
+                // join!(
+                //     async { ... } => { ... }
+                // ```
+                // That is, trying to put a body after a future without capturing its output. This
+                // is not currently allowed, because it's ambiguous whether the scrutinee is
+                // supposed to be a future or a stream. Make sure that gets a clear error message.
+                if input.peek(syn::Token![=>]) {
+                    return Err(input.error(
+                        "`[fut] => [body]` is not allowed, you must write `[output] = [fut] => [body]`",
+                    ));
+                }
                 let _ = input.parse::<syn::Token![,]>()?;
             }
         }
@@ -166,28 +179,26 @@ impl ToTokens for JoinMeMaybe {
         let definitely_finished = quote! {
             (#definitely_finished_count.load(::core::sync::atomic::Ordering::Relaxed) == #total_definitely)
         };
-        // For the drop guard below.
-        let mut finished_flag_references = TokenStream2::new();
         for i in 0..self.arms.len() {
             if let Some(label) = &self.arms[i].cancel_label {
                 let flag_name = &finished_flag_names[i];
                 initializers.extend(quote! {
                     let #flag_name = ::core::sync::atomic::AtomicBool::new(false);
                 });
-                finished_flag_references.extend(quote! {
-                    &#flag_name,
-                });
                 if self.arms[i].is_maybe {
                     initializers.extend(quote! {
-                        let #label = &::join_me_maybe::_impl::new_maybe_canceller(
+                        #[allow(unused_variables)]
+                        let #label = &::join_me_maybe::_impl::new_canceller(
                             &#flag_name,
+                            None,
                         );
                     });
                 } else {
                     initializers.extend(quote! {
-                        let #label = &::join_me_maybe::_impl::new_definitely_canceller(
+                        #[allow(unused_variables)]
+                        let #label = &::join_me_maybe::_impl::new_canceller(
                             &#flag_name,
-                            &#definitely_finished_count,
+                            Some(&#definitely_finished_count),
                         );
                     });
                 }
@@ -214,18 +225,14 @@ impl ToTokens for JoinMeMaybe {
             // drop them. But labeled ones get further wrapped (i.e. the `Pin<&mut Option<T>>` is
             // wrapped) in an `AtomicRefCell`.
             let mut pin_and_wrap = |expr| {
-                if let Some(label) = &self.arms[i].cancel_label {
+                if self.arms[i].cancel_label.is_some() {
                     arm_pins.push(quote! { #arm_name.borrow_mut() });
                     quote! {
                         // Futures that capture their own `Canceller` create an "infinite size
                         // type" error, because the `Canceller` is parametrized on the future type.
                         // Shadowing the self-canceller with a verbosely-named dummy type is my
                         // best attempt to make this discoverable.
-                        let #arm_name = ::core::pin::pin!(::core::option::Option::Some({
-                            #[allow(unused_variables)]
-                            let #label = ::join_me_maybe::_impl::SelfCancellationIsNotSupported;
-                            #expr
-                        }));
+                        let #arm_name = ::core::pin::pin!(::core::option::Option::Some(#expr));
                         let #arm_name = ::join_me_maybe::_impl::AtomicRefCell::new(#arm_name);
                     }
                 } else {
@@ -269,32 +276,6 @@ impl ToTokens for JoinMeMaybe {
                 }
             }
         }
-
-        // Populate the cancellers with references to the futures they cancel.
-        let mut populate_calls = TokenStream2::new();
-        for i in 0..self.arms.len() {
-            if let Some(label) = &self.arms[i].cancel_label {
-                let arm_name = &arm_names[i];
-                populate_calls.extend(quote! {
-                    ::join_me_maybe::_impl::populate(#label, &#arm_name);
-                });
-            }
-        }
-        initializers.extend(quote! {
-            unsafe {
-                #populate_calls
-            }
-        });
-
-        // Instantiate a drop guard that sets all the finished flags. It's important for safety
-        // that this comes after we instantiate all the futures/streams. See the SAFETY comments in
-        // the implementation of `Canceller`.
-        let finished_flag_guard = format_ident!("_finished_flag_guard", span = Span::mixed_site());
-        initializers.extend(quote! {
-            let #finished_flag_guard = ::join_me_maybe::_impl::FinishedFlagDropGuard(
-                [#finished_flag_references].into_iter()
-            );
-        });
 
         // If any arm has a body (or a `finally` expression, but that requires a body), we need to
         // generate a "body future" with a `match` statement in of it, plus an enum to drive that
@@ -373,6 +354,32 @@ impl ToTokens for JoinMeMaybe {
         let run_body_enum_output = format_ident!("run_body_enum_output", span = Span::mixed_site());
         let mut run_body_tokens = TokenStream2::new();
         if has_bodies {
+            let mut canceller_muts = TokenStream2::new();
+            for i in 0..self.arms.len() {
+                if let Some(label) = &self.arms[i].cancel_label {
+                    let arm_name = &arm_names[i];
+                    let flag_name = &finished_flag_names[i];
+                    if self.arms[i].is_maybe {
+                        canceller_muts.extend(quote! {
+                            #[allow(unused_variables)]
+                            let #label = &::join_me_maybe::_impl::new_canceller_mut(
+                                &#flag_name,
+                                None,
+                                &#arm_name,
+                            );
+                        });
+                    } else {
+                        canceller_muts.extend(quote! {
+                            #[allow(unused_variables)]
+                            let #label = &::join_me_maybe::_impl::new_canceller_mut(
+                                &#flag_name,
+                                Some(&#definitely_finished_count),
+                                &#arm_name,
+                            );
+                        });
+                    }
+                }
+            }
             let item = format_ident!("item", span = Span::mixed_site());
             run_body_tokens.extend(quote! {
                 mod #private_module_name {
@@ -383,6 +390,7 @@ impl ToTokens for JoinMeMaybe {
                         #bodies_output_enum_variants
                     }
                 }
+                #canceller_muts
                 let #run_body_no_return = ::core::sync::atomic::AtomicBool::new(false);
                 let mut #run_body_enum_output = ::core::option::Option::None;
                 let mut #run_body_fn = async |#item, #run_body_enum_output: &mut ::core::option::Option<_>| {

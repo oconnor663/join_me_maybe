@@ -349,10 +349,7 @@
 #![no_std]
 
 use atomic_refcell::AtomicRefCell;
-use core::marker::PhantomData;
 use core::pin::Pin;
-use core::ptr;
-use core::sync::atomic::AtomicPtr;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 
 /// The macro that this crate is all about
@@ -361,41 +358,12 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 pub use join_me_maybe_impl::join;
 
 /// The type that provides the `.cancel()` method for labeled arguments
-pub struct Canceller<'a, T> {
+pub struct Canceller<'a> {
     finished: &'a AtomicBool,
     definitely_count: Option<&'a AtomicUsize>,
-    // `Canceller`s are circular. Even though we don't expose a `Canceller` in-scope to the
-    // future/stream that it labels (because that could create cyclic/infinite types and fail to
-    // compile), we still have indirect cycles like "arm_1 cancels arm_2, and arm_2 cancels arm_1".
-    // You can build a cycle like that using interior mutability, and we do, but it tends to run
-    // into trouble when futures have nontrivial `Drop` impls. To work around that, and also to
-    // provide our interior mutability, each `Canceller` uses `AtomicPtr` (i.e. a raw pointer) to
-    // refer to the labeled arm.
-    // SAFETY:
-    // 1. The macro owns all the arms and all the `Canceller`s. The caller can't change the order
-    //    in which they drop.
-    // 2. The `with_pin_mut` method uses unsafe code to re-hydrate shared references, but it goes
-    //    through `AtomicRefCell` to turn those into (pinned) mutable references. If a caller tries
-    //    to abuse `with_pin_mut` to violate the mutable aliasing rule (convoluted but possible),
-    //    we'll just panic instead.
-    // 3. Drop safety is the most subtle detail, because dropping a reference cycle raises the
-    //    possibility that one member of the cycle could observe another member that's already
-    //    dropped. To prevent this, the last object we instantiate and the first object that drops
-    //    on the way out, is a guard that sets all the finished flags. The `with_pin_mut` method
-    //    checks the finished flag and short-circuits if it's set, so no arm can observe any other
-    //    during drop.
-    inner_ptr: AtomicPtr<AtomicRefCell<Pin<&'a mut Option<T>>>>,
-    // Canceller should only be Send when T is Send, but AtomicPtr is unconditionally Send. Use
-    // PhantomData to make Canceller !Send when T is !Send.
-    _phantom: PhantomData<T>,
 }
 
-// SAFETY: Canceller is Sync whenever T is Send, for the same reason as std::sync::Mutex. These
-// types only hand out mutable references to the contents. If the contents are !Sync, those
-// references won't be able to escape the thread they wind up on for as long as they're alive.
-unsafe impl<'a, T: Send> Sync for Canceller<'a, T> {}
-
-impl<'a, T> Canceller<'a, T> {
+impl<'a> Canceller<'a> {
     /// Cancel the corresponding labeled future or stream. It won't be polled again, and it'll be
     /// dropped promptly by the `join!` (though not directly within this method).
     pub fn cancel(&self) {
@@ -412,6 +380,25 @@ impl<'a, T> Canceller<'a, T> {
                 count.fetch_add(1, Relaxed);
             }
         }
+    }
+}
+
+impl<'a> core::fmt::Debug for Canceller<'a> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Canceller").finish_non_exhaustive()
+    }
+}
+
+pub struct CancellerMut<'a, T> {
+    canceller: Canceller<'a>,
+    labeled_cell: &'a AtomicRefCell<Pin<&'a mut Option<T>>>,
+}
+
+impl<'a, T> CancellerMut<'a, T> {
+    /// Cancel the corresponding labeled future or stream. It won't be polled again, and it'll be
+    /// dropped promptly by the `join!` (though not directly within this method).
+    pub fn cancel(&self) {
+        self.canceller.cancel();
     }
 
     /// Obtain a short-lived `Pin<&mut T>` pointing to the labeled future or stream, for the
@@ -430,33 +417,20 @@ impl<'a, T> Canceller<'a, T> {
     where
         F: FnOnce(Option<Pin<&mut T>>) -> U,
     {
-        let mut guard;
-        let mut pin_mut = None;
-        // SAFETY: Don't even try to re-hydrate the inner reference if `finished` is already set.
-        // This isn't really necessary during normal execution (there actually is a window where a
-        // future is finished but not yet dropped, but it wouldn't ruin anything to let you see it
-        // at that point), however it does matter during drop, because these references are
-        // generally cyclic. This relies on the macro to set all the `finished` flags in a drop
-        // guard that drops before anything else.
-        if !self.finished.load(Relaxed) {
-            let inner_ptr = self.inner_ptr.load(Relaxed);
-            assert!(!inner_ptr.is_null(), "should be populated");
-            let inner_ref = unsafe {
-                &*(self.inner_ptr.load(Relaxed) as *const AtomicRefCell<Pin<&mut Option<T>>>)
-            };
-            // SAFETY: If the caller tries to abuse cycles to violate the mutable aliasing rule,
-            // they'll succeed at re-hydrating a shared reference above, but this call to
-            // `borrow_mut` will panic without performing any UB.
-            guard = inner_ref.borrow_mut();
-            pin_mut = guard.as_mut().as_pin_mut();
-        }
-        f(pin_mut)
+        f(self.labeled_cell.borrow_mut().as_mut().as_pin_mut())
     }
 }
 
-impl<'a, T> core::fmt::Debug for Canceller<'a, T> {
+// SAFETY: CancellerMut is Send+Sync whenever T is Send, for the same reason as std::sync::Mutex.
+// It only hands out mutable references to its contents. (I.e. there is no `with_pin_ref` method.)
+// If the contents are !Sync, those references won't be able to escape the thread they wind up on
+// for as long as they're alive.
+unsafe impl<'a, T: Send> Send for CancellerMut<'a, T> {}
+unsafe impl<'a, T: Send> Sync for CancellerMut<'a, T> {}
+
+impl<'a, T> core::fmt::Debug for CancellerMut<'a, T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Canceller").finish_non_exhaustive()
+        f.debug_struct("CancellerMut").finish_non_exhaustive()
     }
 }
 
@@ -467,31 +441,28 @@ pub mod _impl {
     use core::task::{Context, Poll};
     use futures::{FutureExt, Stream, StreamExt};
 
-    pub fn new_definitely_canceller<'a, T>(
+    pub fn new_canceller<'a>(
         finished: &'a AtomicBool,
-        count: &'a AtomicUsize,
-    ) -> Canceller<'a, T> {
+        definitely_count: Option<&'a AtomicUsize>,
+    ) -> Canceller<'a> {
         Canceller {
             finished,
-            definitely_count: Some(count),
-            inner_ptr: AtomicPtr::new(ptr::null_mut()),
-            _phantom: PhantomData,
+            definitely_count,
         }
     }
 
-    pub fn new_maybe_canceller<'a, T>(finished: &'a AtomicBool) -> Canceller<'a, T> {
-        Canceller {
-            finished,
-            definitely_count: None,
-            inner_ptr: AtomicPtr::new(ptr::null_mut()),
-            _phantom: PhantomData,
+    pub fn new_canceller_mut<'a, T>(
+        finished: &'a AtomicBool,
+        definitely_count: Option<&'a AtomicUsize>,
+        labeled_cell: &'a AtomicRefCell<Pin<&'a mut Option<T>>>,
+    ) -> CancellerMut<'a, T> {
+        CancellerMut {
+            canceller: Canceller {
+                finished,
+                definitely_count,
+            },
+            labeled_cell,
         }
-    }
-
-    // See the comments about `inner_ptr` above. This function is unsafe in part because it doesn't
-    // assert any lifetime bounds on its arguments.
-    pub unsafe fn populate<T>(this: &Canceller<'_, T>, inner: &AtomicRefCell<Pin<&mut Option<T>>>) {
-        this.inner_ptr.store(inner as *const _ as *mut _, Relaxed);
     }
 
     // `futures` has `poll!`, but it doesn't have a stream version. The macros is also kind of
@@ -515,29 +486,6 @@ pub mod _impl {
             Poll::Ready(self.0.poll_next_unpin(cx))
         }
     }
-
-    // See the SAFETY comments above about why this is needed.
-    pub struct FinishedFlagDropGuard<'a, Iter>(pub Iter)
-    where
-        Iter: Iterator<Item = &'a AtomicBool>;
-
-    impl<'a, Iter> Drop for FinishedFlagDropGuard<'a, Iter>
-    where
-        Iter: Iterator<Item = &'a AtomicBool>,
-    {
-        fn drop(&mut self) {
-            while let Some(finished_flag) = self.0.next() {
-                finished_flag.store(true, Relaxed);
-            }
-        }
-    }
-
-    // A future that references its own `Canceller` breaks the build with an "infinit-size type"
-    // error, which is very confusing. We shadow self-cancellers with this type, in a desperate
-    // attempt to make the errors more self-explanatory. I would actually prefer not having
-    // self-cancellers in scope at all, but this creates different lifetime issues, and in practice
-    // we need to shadow them with something.
-    pub struct SelfCancellationIsNotSupported;
 
     // The macro needs `AtomicRefCell` internally.
     pub use atomic_refcell::AtomicRefCell;

@@ -1,7 +1,7 @@
 error: future cannot be sent between threads safely
-  --> tests/ui/non_send_canceller.rs:18:13
+  --> tests/ui/non_send_canceller.rs:21:13
    |
-18 |             assert_send(&foo);
+21 |             assert_send(&foo);
    |             ^^^^^^^^^^^^^^^^^ future created by async block is not `Send`
    |
    = help: within `{async block@$DIR/tests/ui/non_send_canceller.rs:9:14: 9:19}`, the trait `Send` is not implemented for `Rc<()>`

@@ -1,0 +1,5 @@
+error: `[fut] => [body]` is not allowed, you must write `[output] = [fut] => [body]`
+ --> tests/ui/missing_capture.rs:6:18
+  |
+6 |         async {} => (),
+  |                  ^
