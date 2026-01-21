@@ -103,11 +103,10 @@
 //! point. This can be useful in closure bodies or nested `async` blocks, where `return` or `break`
 //! doesn't work.
 //!
-//! ## "finish expressions": `<pattern> = <future> => <body>`
+//! ## arm bodies with `=>`
 //!
-//! One of the powerful features of `select!` is that its arm bodies (though not its "scrutinees")
-//! get exclusive mutable access to the enclosing scope. `join_me_maybe!` supports an expanded `=>`
-//! syntax that works similarly:
+//! One of the powerful features of `select!` is that its arm bodies get exclusive mutable access
+//! to the enclosing scope. `join_me_maybe!` supports an expanded `=>` syntax that works similarly:
 //!
 //! ```
 //! # #[tokio::main]
@@ -115,47 +114,54 @@
 //! # use join_me_maybe::join;
 //! # use tokio::time::{sleep, Duration};
 //! let mut counter = 0;
-//! join!(
-//!     _ = sleep(Duration::from_millis(1)) => counter += 1,
-//!     n = async {
+//! let output = join!(
+//!     n = std::future::ready(1) => {
+//!         counter += n;
+//!         42
+//!     },
+//!     m = async {
 //!         sleep(Duration::from_millis(1)).await;
 //!         1
-//!     } => counter += n,
+//!     } => counter += m, // Mutate the same `counter` in both arms.
 //! );
 //! assert_eq!(counter, 2);
+//! // When a `=>` body is present, the output is the value of the body.
+//! assert_eq!(output, (42, ()));
 //! # }
 //! ```
 //!
-//! In order to give these "finish expressions" mutable access to the enclosing scope, without
-//! "snoozing" any of the other concurrent futures, these expressions run in a _synchronous
-//! context_ (i.e. they cannot `.await`). This makes them similar to [`FutureExt::map`] (as opposed
-//! to [`FutureExt::then`]). However, note that trying to accomplish the same thing with `map` (or
-//! `then`) doesn't compile:
+//! Also like `select!`, it's possible to `.await` or `return` in an arm body. (However, `break` or
+//! `continue` in a containing loop are not supported.) Note that a `return` short-circuits the
+//! whole containing function, not just the `join!`. This is useful for error handling:
 //!
-//! ```compile_fail
-//! # #[tokio::main]
-//! # async fn main() {
+//! ```
 //! # use join_me_maybe::join;
 //! # use tokio::time::{sleep, Duration};
-//! # use futures::FutureExt;
-//! let mut counter = 0;
-//! join!(
-//!     sleep(Duration::from_millis(1)).map(|_| counter += 1),
-//!     //                                      ------- first mutable borrow
-//!     async {
-//!         sleep(Duration::from_millis(1)).await;
-//!         1
-//!     }.map(|n| counter += n),
-//!     //        ------- second mutable borrow
-//! );
-//! # }
+//! async fn foo() -> std::io::Result<()> {
+//!     let _: ((), bool) = join!(
+//!         _ = std::future::ready(1) => {
+//!             sleep(Duration::from_millis(1)).await;
+//!             return Ok(()); // Return from `foo` (the whole function, not just the `join!`).
+//!         },
+//!         _ = std::future::ready(2) => {
+//!             std::fs::exists("fallible.txt")? // Error handling with `?` also works.
+//!         },
+//!     );
+//!     unreachable!("`return` short-circuits above.");
+//! }
 //! ```
+//!
+//! Shared mutation from different arm bodies wouldn't be possible if they ran concurrently.
+//! Instead, `join!` only runs one arm body at a time. This is a potential source of surprising
+//! timing bugs, and it's best to avoid `.await`ing in arm bodies if you have a choice. However,
+//! arm bodies and "scrutinees" (the futures to the left of the `=>`) run concurrently.
 //!
 //! ## streams
 //!
 //! Similar to the `=>` syntax for futures above, you can also drive a stream, using `<pattern> in
 //! <stream>` instead of `<pattern> = <future>`. In this case the following expression executes for
-//! each item in the stream. It gets mutable access to the environment, but it cannot `.await`:
+//! each item in the stream. As above, bodies get mutable access to the environment and can
+//! `.await` or `return`:
 //!
 //! ```
 //! # #[tokio::main]
@@ -166,16 +172,15 @@
 //! let mut total = 0;
 //! join!(
 //!     n in stream::iter([1, 2, 3]) => total += n,
-//!     n in stream::iter([4, 5, 6]) => total += n,
+//!     m in stream::iter([4, 5, 6]) => total += m,
 //! );
 //! assert_eq!(total, 21);
 //! # }
 //! ```
 //!
 //! You can optionally follow this syntax with the `finally` keyword and another expression that
-//! executes after the stream is finished (if it's not cancelled). This also gets mutable access to
-//! the environment and cannot `.await`. Streams have no return value by default, but streams with
-//! a `finally` expression take the value of that expression:
+//! executes after the stream is finished (if it's not cancelled). Streams have no return value by
+//! default, but streams with a `finally` expression take the value of that expression:
 //!
 //! ```
 //! # #[tokio::main]
@@ -230,19 +235,20 @@
 //!
 //! ## mutable access to futures and streams
 //!
-//! This feature is even more experimental than everything else above. In synchronous expressions
-//! with mutable access to the calling scope (those after `=>` and `finally`), `label:` cancellers
-//! support an additional method: `.as_pin_mut()`. This returns an `Option<Pin<&mut T>>` pointing
-//! to the corresponding future or stream. (Or `None` if it's already completed/cancelled.) You can
-//! use this to mutate e.g. a [`FuturesUnordered`] or a [`StreamMap`] to add more work to it while
-//! it's being polled. (Not literally while it's being polled, but while it's owned by `join!` and
-//! guaranteed not to be "snoozed".) This is intended as an alternative to patterns that await
-//! futures *by reference*, which tends to be prone to "snoozing" mistakes.
+//! This feature is even more experimental than everything else above. In arm bodies
+//! (blocks/expressions after `=>` and `finally`), `label:` cancellers support an additional
+//! method: `with_pin_mut`. This takes a closure and invokes it with an `Option<Pin<&mut T>>`
+//! pointing to the corresponding future or stream. (`None` if that arm is already completed or
+//! cancelled.) You can use this to mutate e.g. a [`FuturesUnordered`] or a [`StreamMap`] to add
+//! more work to it while it's being polled. (Not literally while it's being polled -- everything
+//! in a `join!` runs on one thread -- but while it's owned by `join!` and guaranteed not to be
+//! "snoozed".) This is intended as an alternative to patterns that await futures *by reference*,
+//! which tends to be prone to "snoozing" mistakes.
 //!
 //! Unfortunately, streams that you can add work to dynamically are usually "poorly behaved" in the
 //! sense that they often return `Ready(None)` for a while, until more work is eventually added and
 //! they start returning `Ready(Some(_))` again. This is at odds with the [usual rule] that you
-//! shouldn't poll a stream again after it returns `Ready(Some)`, but it does work with
+//! shouldn't poll a stream again after it returns `Ready(None)`, but it does work with
 //! `select!`-in-a-loop. (In Tokio it requires an `if` guard, and with `futures::select!` it leans
 //! on the "fused" requirement.) However, it does _not_ naturally work with `join_me_maybe`, which
 //! interprets `Ready(None)` as "end of stream" and promptly drops the whole stream. ([Like it's
@@ -250,16 +256,19 @@
 //! things that as far as I know none of the dynamic streams currently do:
 //!
 //! 1. The stream should only ever return `Ready(Some(_))` or `Pending`, until you somehow inform
-//!    it that no more work is coming, using say a `.close()` method or something. After that the
-//!    stream should probably drain its remaining work before returning `Ready(None)`. (If the
-//!    caller doesn't to wait for remaining work, they can cancel the stream instead.)
+//!    it that no more work is coming, using e.g. a `.close()` method or something like that. After
+//!    that the stream should probably drain its remaining work before returning `Ready(None)`. (If
+//!    the caller doesn't want to wait for remaining work, they can cancel the stream instead.)
 //! 2. Because adding more work might unblock callers that previously received `Pending`, the
 //!    stream should stash a `Waker` and invoke it whenever work is added.
 //!
 //! Adapting a stream that doesn't behave this way is complicated and not obviously a good idea.
 //! [See `tests/test.rs` for some examples.][adapter] Manually tracking `Waker`s is exactly the
 //! sort of error-prone business that this crate wants to _discourage_, and this whole feature will
-//! need a lot of baking before I can recommend it.
+//! need a lot of baking before I can recommend it. However, this approach is necessary to solve
+//! cases like Niko Matsakis' [case study of pub-sub in mini-redis][miniredis].
+//!
+//! [miniredis]: https://smallcultfollowing.com/babysteps/blog/2022/06/13/async-cancellation-a-case-study-of-pub-sub-in-mini-redis/
 //!
 //! ## `no_std`
 //!
@@ -282,7 +291,8 @@
 //!
 //! # Help needed! (from the compiler...)
 //!
-//! As far as I know, there's no way for the `join!` macro to support something like this today:
+//! As far as I know, there's no way for the `join!` macro to support something like this today
+//! (this works in arm bodies, but not as here in the "scrutinee" position):
 //!
 //! ```rust,compile_fail
 //! # #[tokio::main]
@@ -336,15 +346,7 @@
 //!
 //! Another big advantage of adding dedicated syntax for this is that it could support
 //! `return`/`break`/`continue` as usual to diverge from inside any arm. That would be especially
-//! helpful for error handling with `?`, which is awkward in concurrent contexts today.
-//!
-//! Aside: All the options for divergence in Rust today would naturally cancel the whole
-//! `concurrent_bikeshed`. However, if Rust eventually stabilizes `async gen fn` and the `yield`
-//! keyword, then `yield` probably should *not* be allowed inside `concurrent_bikeshed`. Yielding
-//! from any arm would snooze the other arms at arbitrary `.await` points (generally not `yield`
-//! points), where they could be holding locks. This is deadlock-prone in the same way that pausing
-//! or cancelling threads is, and we don't let safe code do either of those things. At the very
-//! least it should be a scary warning.
+//! helpful for error handling with `?`, which is awkward in a lot of concurrent contexts today.
 
 #![no_std]
 
