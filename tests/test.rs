@@ -476,3 +476,13 @@ async fn test_circular_cancellation() {
     assert!(did_write1);
     assert!(!did_write2);
 }
+
+// This is mainly to check that these cases don't warn about unreachable code.
+#[tokio::test]
+#[should_panic]
+async fn test_panic_in_body() {
+    join!(
+        _ = ready(2) => todo!(),
+        _ in stream::iter([1, 2, 3]) => todo!(),
+    );
+}

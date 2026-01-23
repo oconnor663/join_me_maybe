@@ -333,6 +333,7 @@ impl ToTokens for JoinMeMaybe {
                 bodies_match_arms.extend(quote! {
                     #private_module_name::ArmsInput::#variant_name(#pattern) => {
                         let _: () = #body;
+                        #[allow(unreachable_code)]
                         #private_module_name::ArmsOutput::#variant_name
                     }
                 });
