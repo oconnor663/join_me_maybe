@@ -1,0 +1,29 @@
+error: unreachable statement
+  --> tests/ui/unreachable_code_warnings.rs:10:13
+   |
+ 9 |             panic!();
+   |             -------- any code following this expression is unreachable
+10 |             _ = 42;
+   |             ^^^^^^^ unreachable statement
+   |
+note: the lint level is defined here
+  --> tests/ui/unreachable_code_warnings.rs:1:9
+   |
+ 1 | #![deny(unreachable_code)]
+   |         ^^^^^^^^^^^^^^^^
+
+error: unreachable statement
+  --> tests/ui/unreachable_code_warnings.rs:14:13
+   |
+13 |             panic!();
+   |             -------- any code following this expression is unreachable
+14 |             _ = 42;
+   |             ^^^^^^^ unreachable statement
+
+error: unreachable statement
+  --> tests/ui/unreachable_code_warnings.rs:17:13
+   |
+16 |             panic!();
+   |             -------- any code following this expression is unreachable
+17 |             _ = 42;
+   |             ^^^^^^^ unreachable statement
