@@ -1,6 +1,6 @@
 [package]
 name = "join_me_maybe"
-version = "0.4.0"
+version = "0.4.1"
 authors = ["Jack O'Connor <oconnor663@gmail.com>"]
 description = "an async `join!` macro with `select!`-like features"
 repository = "https://github.com/oconnor663/join_me_maybe"
