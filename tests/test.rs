@@ -483,6 +483,6 @@ async fn test_circular_cancellation() {
 async fn test_panic_in_body() {
     join!(
         _ = ready(2) => todo!(),
-        _ in stream::iter([1, 2, 3]) => todo!(),
+        _ in stream::iter([1, 2, 3]) => todo!() finally todo!(),
     );
 }
