@@ -236,14 +236,15 @@
 //! ## mutable access to futures and streams
 //!
 //! This feature is even more experimental than everything else above. In arm bodies
-//! (blocks/expressions after `=>` and `finally`), `label:` cancellers support an additional
-//! method: `with_pin_mut`. This takes a closure and invokes it with an `Option<Pin<&mut T>>`
-//! pointing to the corresponding future or stream. (`None` if that arm is already completed or
-//! cancelled.) You can use this to mutate e.g. a [`FuturesUnordered`] or a [`StreamMap`] to add
-//! more work to it while it's being polled. (Not literally while it's being polled -- everything
-//! in a `join!` runs on one thread -- but while it's owned by `join!` and guaranteed not to be
-//! "snoozed".) This is intended as an alternative to patterns that await futures *by reference*,
-//! which tends to be prone to "snoozing" mistakes.
+//! (blocks/expressions after `=>` and `finally`), `label:` cancellers support a couple additional
+//! methods: `with_pin_mut` and (for `Unpin` types) `with_mut`. These take a closure and invoke it
+//! with an `Option<Pin<&mut T>>` (`Option<&mut T>` respectively) pointing to the corresponding
+//! future or stream, or `None` if that arm is already completed or cancelled. You can use this to
+//! mutate e.g. a [`FuturesUnordered`] or a [`StreamMap`] to add more work to it while it's being
+//! polled. (Not literally while it's being polled -- everything in a `join!` runs on one thread --
+//! but while it's owned by `join!` and guaranteed not to be "snoozed".) This is intended as an
+//! alternative to patterns that await futures *by reference*, which tends to be prone to
+//! "snoozing" mistakes.
 //!
 //! Unfortunately, streams that you can add work to dynamically are usually "poorly behaved" in the
 //! sense that they often return `Ready(None)` for a while, until more work is eventually added and
@@ -391,6 +392,8 @@ impl<'a> core::fmt::Debug for Canceller<'a> {
     }
 }
 
+/// The canceller type visible in arm bodies, which supports [`with_pin_mut`][Self::with_pin_mut]
+/// and [`with_mut`][Self::with_mut].
 pub struct CancellerMut<'a, T> {
     canceller: Canceller<'a>,
     labeled_cell: &'a AtomicRefCell<Pin<&'a mut Option<T>>>,
@@ -411,15 +414,21 @@ impl<'a, T> CancellerMut<'a, T> {
     /// `with_pin_mut` and try to borrow the same arm twice, the second call will panic.
     ///
     /// [`AtomicRefCell`]: https://docs.rs/atomic_refcell/latest/atomic_refcell/struct.AtomicRefCell.html
-    ///
-    /// Note that if you call this method from the `Drop` impl of your future or stream (you'll
-    /// probably never do that, but your evil twin might), the closure will always receive `None`,
-    /// regardless of the drop order of the arms. This is necessary to avoid dangling references.
     pub fn with_pin_mut<F, U>(&self, f: F) -> U
     where
         F: FnOnce(Option<Pin<&mut T>>) -> U,
     {
         f(self.labeled_cell.borrow_mut().as_mut().as_pin_mut())
+    }
+
+    /// Like [`with_pin_mut`][Self::with_pin_mut] above but without `Pin`. This requires the
+    /// underlying type to be `Unpin`.
+    pub fn with_mut<F, U>(&self, f: F) -> U
+    where
+        F: FnOnce(Option<&mut T>) -> U,
+        T: Unpin,
+    {
+        f(self.labeled_cell.borrow_mut().as_mut().get_mut().as_mut())
     }
 }
 

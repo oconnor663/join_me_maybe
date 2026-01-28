@@ -227,7 +227,8 @@ async fn test_canceller_mut_futuresunordered() {
             unordered.with_pin_mut(|unordered| {
                 unordered.unwrap().inner().push(async move { i });
             });
-        } finally unordered.with_pin_mut(|unordered| unordered.unwrap().end()),
+        // `ResumingStream` and `FuturesUnordered` are `Unpin`, so we can test `with_mut` here.
+        } finally unordered.with_mut(|unordered| unordered.unwrap().end()),
         unordered: i in resuming(FuturesUnordered::new()) => outputs.push(i),
     );
     outputs.sort();
