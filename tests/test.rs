@@ -487,3 +487,69 @@ async fn test_panic_in_body() {
         _ in stream::iter([1, 2, 3]) => todo!() finally todo!(),
     );
 }
+
+#[tokio::test]
+async fn test_type_annotation_needed() {
+    join!(
+        x = ready(Some(true)) => {
+            // TODO: Currently this type annotation is needed. See ui/type_annotation_needed.rs for
+            // the error output without it.
+            let x: Option<bool> = x;
+            x.unwrap();
+        }
+    );
+}
+
+#[tokio::test]
+async fn test_maybe_bodies_cancelled() {
+    let mut definitely_finished = false;
+    let mut definitely_body_finished = false;
+    let mut maybe_started = false;
+    let mut maybe_finished = false;
+    join!(
+        _ = async {
+            sleep(Duration::from_millis(10)).await;
+            definitely_finished = true;
+        } => {
+            // This body runs after cancelling the maybe body.
+            definitely_body_finished = true;
+        },
+        maybe _ = ready(()) => {
+            // This body starts immediately, but because it's a `maybe` arm, it gets cancelled
+            // after the sleep finishes.
+            maybe_started = true;
+            sleep(Duration::from_secs(1_000_000)).await;
+            maybe_finished = true;
+        },
+    );
+    assert!(definitely_finished);
+    assert!(definitely_body_finished);
+    assert!(maybe_started);
+    assert!(!maybe_finished);
+}
+
+#[tokio::test]
+async fn test_cancelled_bodies_cancelled() {
+    let mut maybe_started = false;
+    let mut labeled_started = false;
+    let mut labeled_finished = false;
+    join!(
+        maybe _ = async {
+            sleep(Duration::from_millis(10)).await;
+            labeled.cancel();
+        } => {
+            // This body doesn't run, because after the cancellation above there are no more
+            // "definitely" futures.
+            maybe_started = true;
+        },
+        labeled: _ = ready(()) => {
+            // This body starts immediately, but it gets cancelled.
+            labeled_started = true;
+            sleep(Duration::from_secs(1_000_000)).await;
+            labeled_finished = true;
+        },
+    );
+    assert!(!maybe_started);
+    assert!(labeled_started);
+    assert!(!labeled_finished);
+}
