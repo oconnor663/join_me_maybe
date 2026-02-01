@@ -1,0 +1,5 @@
+error[E0282]: type annotations needed
+  --> tests/ui/type_annotation_needed.rs:10:13
+   |
+10 |             x.unwrap();
+   |             ^ cannot infer type

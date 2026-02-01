@@ -166,6 +166,16 @@ impl ToTokens for JoinMeMaybe {
         initializers.extend(quote! {
             let #definitely_finished_count = ::core::sync::atomic::AtomicUsize::new(0);
         });
+        // Finished flags are set whenever a "labeled definitely" stream/future completes, either
+        // naturally or by being cancelled. We use these to make sure the
+        // `definitely_finished_count` gets bumped exactly once for each. ("Unlabeled definitely"
+        // arms always bump the count when they finish, but labeled definitely arms need to be
+        // defensive about cancelling themselves right before finishing.) Note that even if
+        // finished is set, the corresponding body/finally might still be running. Tracking things
+        // this way lets us cancel a "maybe" body as soon as all the "definitely" futures/streams
+        // complete, without waiting for all the "definitely" bodies, which is important because
+        // only one body runs at a time. (Otherwise a long-running "maybe" body could delay exit by
+        // preventing execution of the "definitely" bodies.)
         let finished_flag_names: Vec<_> = (0..self.arms.len())
             .map(|i| format_ident!("arm_{i}_finished", span = Span::mixed_site()))
             .collect();
@@ -174,6 +184,12 @@ impl ToTokens for JoinMeMaybe {
         let should_run_finally_flag_names: Vec<_> = (0..self.arms.len())
             .map(|i| format_ident!("arm_{i}_should_run_finally", span = Span::mixed_site()))
             .collect();
+        // Cancelled flags are set if a labeled arm is explicitly cancelled. For "labeled
+        // definitely" arms, the corresponding finished flag is also set. Setting the cancelled
+        // flag also cancels the corresponding body/finally if it's already running.
+        let cancelled_flag_names: Vec<_> = (0..self.arms.len())
+            .map(|i| format_ident!("arm_{i}_cancelled", span = Span::mixed_site()))
+            .collect();
         // Parens are generally necessary here (e.g. for negation) even though the spots where
         // they're unnecessary generate a bunch of warnings in expanded code.
         let definitely_finished = quote! {
@@ -181,24 +197,30 @@ impl ToTokens for JoinMeMaybe {
         };
         for i in 0..self.arms.len() {
             if let Some(label) = &self.arms[i].cancel_label {
-                let flag_name = &finished_flag_names[i];
+                let cancelled_flag_name = &cancelled_flag_names[i];
                 initializers.extend(quote! {
-                    let #flag_name = ::core::sync::atomic::AtomicBool::new(false);
+                    let #cancelled_flag_name = ::core::sync::atomic::AtomicBool::new(false);
                 });
                 if self.arms[i].is_maybe {
                     initializers.extend(quote! {
                         #[allow(unused_variables)]
                         let #label = &::join_me_maybe::_impl::new_canceller(
-                            &#flag_name,
+                            &#cancelled_flag_name,
                             None,
+                            &#definitely_finished_count,
                         );
                     });
                 } else {
+                    let finished_flag_name = &finished_flag_names[i];
+                    initializers.extend(quote! {
+                        let #finished_flag_name = ::core::sync::atomic::AtomicBool::new(false);
+                    });
                     initializers.extend(quote! {
                         #[allow(unused_variables)]
                         let #label = &::join_me_maybe::_impl::new_canceller(
-                            &#flag_name,
-                            Some(&#definitely_finished_count),
+                            &#cancelled_flag_name,
+                            ::core::option::Option::Some(&#finished_flag_name),
+                            &#definitely_finished_count,
                         );
                     });
                 }
@@ -228,10 +250,6 @@ impl ToTokens for JoinMeMaybe {
                 if self.arms[i].cancel_label.is_some() {
                     arm_pins.push(quote! { #arm_name.borrow_mut() });
                     quote! {
-                        // Futures that capture their own `Canceller` create an "infinite size
-                        // type" error, because the `Canceller` is parametrized on the future type.
-                        // Shadowing the self-canceller with a verbosely-named dummy type is my
-                        // best attempt to make this discoverable.
                         let #arm_name = ::core::pin::pin!(::core::option::Option::Some(#expr));
                         let #arm_name = ::join_me_maybe::_impl::AtomicRefCell::new(#arm_name);
                     }
@@ -278,8 +296,8 @@ impl ToTokens for JoinMeMaybe {
         }
 
         // If any arm has a body (or a `finally` expression, but that requires a body), we need to
-        // generate a "body future" with a `match` statement in of it, plus an enum to drive that
-        // `match`.
+        // generate a "body future", a `match` statement for its body, and an input enum to drive
+        // that `match`.
         let mut bodies_input_enum_generic_params = TokenStream2::new();
         let mut bodies_input_enum_variants = TokenStream2::new();
         let mut bodies_match_arms = TokenStream2::new();
@@ -310,7 +328,7 @@ impl ToTokens for JoinMeMaybe {
                         };
                         #[allow(unreachable_code)]
                         {
-                            #arm_output = Some(#output_temporary);
+                            #arm_output = ::core::option::Option::Some(#output_temporary);
                         }
                     }
                 });
@@ -344,7 +362,7 @@ impl ToTokens for JoinMeMaybe {
                             };
                             #[allow(unreachable_code)]
                             {
-                                #arm_output = Some(#output_temporary);
+                                #arm_output = ::core::option::Option::Some(#output_temporary);
                             }
                         }
                     });
@@ -354,28 +372,33 @@ impl ToTokens for JoinMeMaybe {
         let run_body_fn = format_ident!("run_body_fn", span = Span::mixed_site());
         let run_body_future = format_ident!("run_body_future", span = Span::mixed_site());
         let run_body_no_return = format_ident!("run_body_no_return", span = Span::mixed_site());
+        let body_is_maybe = format_ident!("body_is_maybe", span = Span::mixed_site());
+        let body_cancelled_flag = format_ident!("body_cancelled_flag", span = Span::mixed_site());
         let mut run_body_tokens = TokenStream2::new();
         if has_bodies {
             let mut canceller_muts = TokenStream2::new();
             for i in 0..self.arms.len() {
                 if let Some(label) = &self.arms[i].cancel_label {
                     let arm_name = &arm_names[i];
-                    let flag_name = &finished_flag_names[i];
+                    let cancelled_flag = &cancelled_flag_names[i];
                     if self.arms[i].is_maybe {
                         canceller_muts.extend(quote! {
                             #[allow(unused_variables)]
                             let #label = &::join_me_maybe::_impl::new_canceller_mut(
-                                &#flag_name,
+                                &#cancelled_flag,
                                 None,
+                                &#definitely_finished_count,
                                 &#arm_name,
                             );
                         });
                     } else {
+                        let finished_flag = &finished_flag_names[i];
                         canceller_muts.extend(quote! {
                             #[allow(unused_variables)]
                             let #label = &::join_me_maybe::_impl::new_canceller_mut(
-                                &#flag_name,
-                                Some(&#definitely_finished_count),
+                                &#cancelled_flag,
+                                ::core::option::Option::Some(&#finished_flag),
+                                &#definitely_finished_count,
                                 &#arm_name,
                             );
                         });
@@ -412,6 +435,8 @@ impl ToTokens for JoinMeMaybe {
                 // because the compiler needs to be defensive about panics.) This is necessary when
                 // the body closure 1) is mutating / AsyncFnMut and 2) needs Drop.
                 let mut #run_body_future = ::core::option::Option::None;
+                let mut #body_is_maybe = false;
+                let mut #body_cancelled_flag: ::core::option::Option<&::core::sync::atomic::AtomicBool> = ::core::option::Option::None;
             });
         }
 
@@ -422,6 +447,7 @@ impl ToTokens for JoinMeMaybe {
             let arm_item = &arm_items[i];
             let arm_should_run_finally = &should_run_finally_flag_names[i];
             let arm_output = &arm_outputs[i];
+            let cancelled_flag = &cancelled_flag_names[i];
             let finished_flag = &finished_flag_names[i];
             let future_or_stream = match &arm.kind {
                 ArmKind::FutureOnly { .. } | ArmKind::FutureAndBody { .. } => {
@@ -456,7 +482,7 @@ impl ToTokens for JoinMeMaybe {
                     };
                     quote! {
                         match ::join_me_maybe::_impl::PollNextOnce(#future_or_stream).await {
-                            ::core::task::Poll::Ready(Some(item)) => {
+                            ::core::task::Poll::Ready(::core::option::Option::Some(item)) => {
                                 // The has yielded an item, which needs to be consumed by the body.
                                 // We're returning `false` here, because the stream isn't finished,
                                 // but note that we haven't registered a wakeup. If the body
@@ -484,24 +510,35 @@ impl ToTokens for JoinMeMaybe {
                     break;
                 }
             };
-            if let Some(label) = &arm.cancel_label {
+            if arm.cancel_label.is_some() {
+                let bump_count = if !arm.is_maybe {
+                    quote! {
+                        // If this just-finished, labeled future/stream is a "definitely" arm,
+                        // we need to bump the count, but we don't want to do that
+                        // unconditionally. It might've just cancelled itself right before
+                        // exiting (pointlessly?) and already bumped the count. It would be
+                        // convenient to just call `.cancel()` here, but we don't want to set
+                        // the cancelled flag, because we want the body/finally (if any) to
+                        // run. Repeat a similar check here.
+                        let already_finished = #finished_flag.swap(true, ::core::sync::atomic::Ordering::Relaxed);
+                        if !already_finished {
+                            #definitely_finished_count.fetch_add(1, ::core::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                } else {
+                    quote! {}
+                };
                 polling_and_counting.extend(quote! {
-                    if !#finished_flag.load(::core::sync::atomic::Ordering::Relaxed) {
+                    if !#cancelled_flag.load(::core::sync::atomic::Ordering::Relaxed) {
                         let mut guard = #arm_name.borrow_mut();
-                        let is_ready = if let Some(#future_or_stream) = guard.as_mut().as_pin_mut() {
+                        let is_ready = if let ::core::option::Option::Some(#future_or_stream) = guard.as_mut().as_pin_mut() {
                             #poll_is_ready
                         } else {
                             false
                         };
                         if is_ready {
-                            // If this just-finished, labeled future/stream is a "definitely" arm,
-                            // we need to bump the count, but we don't want to do that
-                            // unconditionally. It might've just cancelled itself right before
-                            // exiting (pointlessly?) and already bumped the count. Calling
-                            // `cancel` again has no effect on execution but keeps the count
-                            // consistent. It's also how we set the finished flag.
-                            #label.cancel();
                             guard.set(::core::option::Option::None);
+                            #bump_count
                         }
                         #check_definitely_finished
                     }
@@ -517,7 +554,7 @@ impl ToTokens for JoinMeMaybe {
                     quote! {}
                 };
                 polling_and_counting.extend(quote! {
-                    let is_ready = if let Some(#future_or_stream) = #arm_name.as_mut().as_pin_mut() {
+                    let is_ready = if let ::core::option::Option::Some(#future_or_stream) = #arm_name.as_mut().as_pin_mut() {
                         #poll_is_ready
                     } else {
                         false
@@ -539,14 +576,14 @@ impl ToTokens for JoinMeMaybe {
         let mut cancel_all = TokenStream2::new();
         let mut cancel_labeled = TokenStream2::new();
         for i in 0..self.arms.len() {
-            let finished_flag = &finished_flag_names[i];
+            let cancelled_flag = &cancelled_flag_names[i];
             let arm_pin = &arm_pins[i];
             cancel_all.extend(quote! {
                 #arm_pin.set(::core::option::Option::None);
             });
             if self.arms[i].cancel_label.is_some() {
                 cancel_labeled.extend(quote! {
-                    if #finished_flag.load(::core::sync::atomic::Ordering::Relaxed) {
+                    if #cancelled_flag.load(::core::sync::atomic::Ordering::Relaxed) {
                         #arm_pin.set(::core::option::Option::None);
                     }
                 });
@@ -571,10 +608,22 @@ impl ToTokens for JoinMeMaybe {
             let arm = &self.arms[i];
             let arm_name = &arm_names[i];
             let arm_item = &arm_items[i];
+            let body_is_maybe_value = arm.is_maybe;
+            let body_cancelled_flag_value = if arm.cancel_label.is_some() {
+                let cancelled_flag = &cancelled_flag_names[i];
+                quote! { ::core::option::Option::Some(&#cancelled_flag) }
+            } else {
+                quote! { None }
+            };
+            let set_body_flags_and_continue = quote! {
+                #body_is_maybe = #body_is_maybe_value;
+                #body_cancelled_flag = #body_cancelled_flag_value;
+                continue; // Loop again to poll this.
+            };
             if let ArmKind::FutureAndBody { .. } = &arm.kind {
                 let variant_name = format_ident!("Arm{i}");
                 try_to_call_run_body.extend(quote! {
-                    if let Some(item) = #arm_item.take() {
+                    if let ::core::option::Option::Some(item) = #arm_item.take() {
                         // Drop-then-assign means that the old value and the new value don't
                         // overlap, which actually isn't the case for simple assignment (because
                         // the compiler has to be defensive about panics). This is necessary when
@@ -587,29 +636,35 @@ impl ToTokens for JoinMeMaybe {
                         // (In summary, `... = None` is for soundness, and `drop` is for borrowck.)
                         #run_body_future = None;
                         drop(#run_body_future);
-                        #run_body_future = Some(#run_body_fn(#private_module_name::ArmsInput::#variant_name(item)));
-                        continue; // Loop again to poll this.
+                        #run_body_future = ::core::option::Option::Some(#run_body_fn(#private_module_name::ArmsInput::#variant_name(item)));
+                        #set_body_flags_and_continue
                     }
                 });
             }
             if let ArmKind::StreamAndBody { finally, .. } = &arm.kind {
                 let variant_name = format_ident!("Arm{i}");
                 let is_live = if arm.cancel_label.is_some() {
-                    let finished_flag = &finished_flag_names[i];
-                    quote! { !#finished_flag.load(::core::sync::atomic::Ordering::Relaxed) }
+                    if arm.is_maybe {
+                        // Maybe arms don't have a finished flag. Just inspect the AtomicRefCell
+                        // itself.
+                        quote! { #arm_name.borrow().is_some() }
+                    } else {
+                        let finished_flag = &finished_flag_names[i];
+                        quote! { !#finished_flag.load(::core::sync::atomic::Ordering::Relaxed) }
+                    }
                 } else {
                     quote! { #arm_name.is_some() }
                 };
                 try_to_call_run_body.extend(quote! {
-                    if let Some(item) = #arm_item.take() {
+                    if let ::core::option::Option::Some(item) = #arm_item.take() {
                         // SAFETY: See above about `None` and `drop`.
                         #run_body_future = None;
                         drop(#run_body_future);
-                        #run_body_future = Some(#run_body_fn(#private_module_name::ArmsInput::#variant_name(item)));
+                        #run_body_future = ::core::option::Option::Some(#run_body_fn(#private_module_name::ArmsInput::#variant_name(item)));
                         if #is_live {
                             #item_consumed_from_live_stream = true;
                         }
-                        continue; // Loop again to poll this.
+                        #set_body_flags_and_continue
                     }
                 });
                 if finally.is_some() {
@@ -621,9 +676,9 @@ impl ToTokens for JoinMeMaybe {
                             // SAFETY: See above about `None` and `drop`.
                             #run_body_future = None;
                             drop(#run_body_future);
-                            #run_body_future = Some(#run_body_fn(#private_module_name::ArmsInput::#variant_name));
+                            #run_body_future = ::core::option::Option::Some(#run_body_fn(#private_module_name::ArmsInput::#variant_name));
                             #arm_should_run_finally = false;
-                            continue; // Loop again to poll this.
+                            #set_body_flags_and_continue
                         }
                     });
                 }
@@ -633,7 +688,20 @@ impl ToTokens for JoinMeMaybe {
         if has_bodies {
             run_bodies_loop.extend(quote! {
                 loop {
-                    if let Some(future) = #run_body_future.as_mut() {
+                    if #run_body_future.is_some() && #body_is_maybe && #definitely_finished {
+                        #run_body_future = None;
+                        drop(#run_body_future);
+                        #run_body_future = None;
+                    }
+                    if #run_body_future.is_some()
+                        && let ::core::option::Option::Some(cancelled) = &#body_cancelled_flag
+                        && cancelled.load(::core::sync::atomic::Ordering::Relaxed)
+                    {
+                        #run_body_future = None;
+                        drop(#run_body_future);
+                        #run_body_future = None;
+                    }
+                    if let ::core::option::Option::Some(future) = #run_body_future.as_mut() {
                         let poll = ::join_me_maybe::_impl::PollOnce(unsafe {
                             ::core::pin::Pin::new_unchecked(future)
                         }).await;

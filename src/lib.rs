@@ -187,18 +187,27 @@
 //! # async fn main() {
 //! # use join_me_maybe::join;
 //! # use futures::stream;
+//! # use tokio::time::{sleep, Duration};
 //! let ret = join!(
 //!     // This stream has no `finally` expression, so it returns `()`.
 //!     _ in stream::iter([42]) => {},
-//!     // This arm's `finally` expression is `1`, and the `maybe` means we get `Some(1)`.
-//!     maybe _ in stream::iter([42]) => {} finally 1,
-//!     // Same, but without `maybe` we get the unwrapped value.
-//!     _ in stream::iter([42]) => {} finally 2,
-//!     // All the streams above finish immediately, so this `maybe` stream gets cancelled and
-//!     // returns `None` instead of evaluating its `finally` expression.
+//!     // This stream has a `finally` expression.
+//!     _ in stream::iter([42]) => {} finally 1,
+//!     // This stream has a `finally` block that awaits.
+//!     _ in stream::iter([42]) => {} finally {
+//!         std::future::ready(2).await
+//!     },
+//!     // This `maybe` arm's has its `finally` expression wrapped in an `Option`.
 //!     maybe _ in stream::iter([42]) => {} finally 3,
+//!     // Sleep to give the `maybe` arms above time to run.
+//!     sleep(Duration::from_millis(10)),
+//!     // This `maybe` arm's `finally` block gets cancelled when the sleep above finishes.
+//!     maybe _ in stream::iter([42]) => {} finally {
+//!         tokio::time::sleep(Duration::from_millis(20)).await;
+//!         2
+//!     },
 //! );
-//! assert_eq!(ret, ((), Some(1), 2, None));
+//! assert_eq!(ret, ((), 1, 2, Some(3), (), None));
 //! # }
 //! ```
 //!
@@ -362,25 +371,22 @@ pub use join_me_maybe_impl::join;
 
 /// The type that provides the `.cancel()` method for labeled arguments
 pub struct Canceller<'a> {
-    finished: &'a AtomicBool,
-    definitely_count: Option<&'a AtomicUsize>,
+    cancelled: &'a AtomicBool,
+    finished: Option<&'a AtomicBool>, // only set for "definitely" arms
+    definitely_count: &'a AtomicUsize,
 }
 
 impl<'a> Canceller<'a> {
     /// Cancel the corresponding labeled future or stream. It won't be polled again, and it'll be
     /// dropped promptly by the `join!` (though not directly within this method).
     pub fn cancel(&self) {
-        // It's tempting try to clear the inner `Option` directly (the one inside the
-        // `AtomicRefCell`), and that would work in most cases, but it wouldn't work for
-        // self-cancellation. The running arm's cell is already mutably borrowed, and re-borrowing
-        // it will panic. Just set the finished flag, and trust that the `join!` macro will drop it
-        // when it's definitely not being polled.
-        let already_cancelled = self.finished.swap(true, Relaxed);
-        if !already_cancelled {
-            // The macro calls this method if labeled futures exit naturally too, so each
-            // definitely future bumps the count exactly once either way.
-            if let Some(count) = &self.definitely_count {
-                count.fetch_add(1, Relaxed);
+        // We can't drop the corresponding future/stream here, even if we had a reference to it,
+        // because in the self-cancellation case the AtomicRefCell would panic.
+        self.cancelled.store(true, Relaxed);
+        if let Some(finished) = self.finished {
+            let already_finished = finished.swap(true, Relaxed);
+            if !already_finished {
+                self.definitely_count.fetch_add(1, Relaxed);
             }
         }
     }
@@ -453,22 +459,26 @@ pub mod _impl {
     use futures::{FutureExt, Stream, StreamExt};
 
     pub fn new_canceller<'a>(
-        finished: &'a AtomicBool,
-        definitely_count: Option<&'a AtomicUsize>,
+        cancelled: &'a AtomicBool,
+        finished: Option<&'a AtomicBool>,
+        definitely_count: &'a AtomicUsize,
     ) -> Canceller<'a> {
         Canceller {
+            cancelled,
             finished,
             definitely_count,
         }
     }
 
     pub fn new_canceller_mut<'a, T>(
-        finished: &'a AtomicBool,
-        definitely_count: Option<&'a AtomicUsize>,
+        cancelled: &'a AtomicBool,
+        finished: Option<&'a AtomicBool>,
+        definitely_count: &'a AtomicUsize,
         labeled_cell: &'a AtomicRefCell<Pin<&'a mut Option<T>>>,
     ) -> CancellerMut<'a, T> {
         CancellerMut {
             canceller: Canceller {
+                cancelled,
                 finished,
                 definitely_count,
             },

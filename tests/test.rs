@@ -132,9 +132,9 @@ async fn test_future_arms_with_bodies() {
             counter += 1;
             10 * y
         },
-        _ = ready(3) => counter += 1,
+        _ = sleep(Duration::from_millis(1)) => counter += 1,
         // This arm gets cancelled.
-        maybe _ = ready(4) => counter += 1,
+        maybe _ = sleep(Duration::from_millis(10)) => counter += 1,
     );
     assert_eq!(ret, (Some("hello"), 20, (), None));
     assert_eq!(counter, 3);
@@ -329,12 +329,14 @@ async fn test_finally_values() {
     // Streams with a finally block return a value.
     let ret = join!(
         maybe _ in futures::stream::iter([()]) => {},
+        // This stream will complete before the "definitely" streams below, just because it comes
+        // first, but its finally expression will get cancelled.
         maybe _ in futures::stream::iter([()]) => {} finally 99,
         _ in futures::stream::iter([()]) => {},
         _ in futures::stream::iter([()]) => {} finally 42,
         maybe _ in futures::stream::iter([()]) => {} finally 1_000_000,
     );
-    assert_eq!(ret, ((), Some(99), (), 42, None));
+    assert_eq!(ret, ((), None, (), 42, None));
 }
 
 #[tokio::test]
@@ -486,4 +488,64 @@ async fn test_panic_in_body() {
         _ = ready(2) => todo!(),
         _ in stream::iter([1, 2, 3]) => todo!() finally todo!(),
     );
+}
+
+#[tokio::test]
+async fn test_type_annotation_needed() {
+    join!(
+        x = ready(Some(true)) => {
+            // TODO: Currently this type annotation is needed. See ui/type_annotation_needed.rs for
+            // the error output without it.
+            let x: Option<bool> = x;
+            x.unwrap();
+        }
+    );
+}
+
+#[tokio::test]
+async fn test_maybe_bodies_cancelled() {
+    let mut definitely_finished = false;
+    let mut definitely_body_finished = false;
+    let mut maybe_started = false;
+    let mut maybe_finished = false;
+    join!(
+        _ = async {
+            sleep(Duration::from_millis(10)).await;
+            definitely_finished = true;
+        } => {
+            // This body runs after cancelling the maybe body.
+            definitely_body_finished = true;
+        },
+        maybe _ = ready(()) => {
+            // This body starts immediately, but because it's a `maybe` arm, it gets cancelled
+            // after the sleep finishes.
+            maybe_started = true;
+            sleep(Duration::from_secs(1_000_000)).await;
+            maybe_finished = true;
+        },
+    );
+    assert!(definitely_finished);
+    assert!(definitely_body_finished);
+    assert!(maybe_started);
+    assert!(!maybe_finished);
+}
+
+#[tokio::test]
+async fn test_cancelled_bodies_cancelled() {
+    let mut labeled_started = false;
+    let mut labeled_finished = false;
+    join!(
+        async {
+            sleep(Duration::from_millis(10)).await;
+            labeled.cancel();
+        },
+        labeled: _ = ready(()) => {
+            // This body starts immediately, but it gets cancelled.
+            labeled_started = true;
+            sleep(Duration::from_secs(1_000_000)).await;
+            labeled_finished = true;
+        },
+    );
+    assert!(labeled_started);
+    assert!(!labeled_finished);
 }
