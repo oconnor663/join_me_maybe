@@ -282,8 +282,6 @@ impl ToTokens for JoinMeMaybe {
         // `match`.
         let mut bodies_input_enum_generic_params = TokenStream2::new();
         let mut bodies_input_enum_variants = TokenStream2::new();
-        let mut bodies_output_enum_generic_params = TokenStream2::new();
-        let mut bodies_output_enum_variants = TokenStream2::new();
         let mut bodies_match_arms = TokenStream2::new();
         let mut has_bodies = false;
         // Mixed-site identifiers can hide variables from the caller, but they can't hide
@@ -297,14 +295,13 @@ impl ToTokens for JoinMeMaybe {
         );
         let output_temporary = format_ident!("_output");
         for (i, arm) in self.arms.iter().enumerate() {
+            let arm_output = &arm_outputs[i];
             if let ArmKind::FutureAndBody { pattern, body, .. } = &arm.kind {
                 has_bodies = true;
                 let param_name = format_ident!("T{i}");
                 let variant_name = format_ident!("Arm{i}");
                 bodies_input_enum_generic_params.extend(quote! { #param_name, });
                 bodies_input_enum_variants.extend(quote! { #variant_name(#param_name), });
-                bodies_output_enum_generic_params.extend(quote! { #param_name, });
-                bodies_output_enum_variants.extend(quote! { #variant_name(#param_name), });
                 bodies_match_arms.extend(quote! {
                     // Suppress unreachable code warnings if the #body returns.
                     #private_module_name::ArmsInput::#variant_name(#pattern) => {
@@ -312,7 +309,9 @@ impl ToTokens for JoinMeMaybe {
                             #body
                         };
                         #[allow(unreachable_code)]
-                        #private_module_name::ArmsOutput::#variant_name(#output_temporary)
+                        {
+                            #arm_output = Some(#output_temporary);
+                        }
                     }
                 });
             }
@@ -329,27 +328,24 @@ impl ToTokens for JoinMeMaybe {
                 bodies_input_enum_generic_params.extend(quote! { #param_name, });
                 bodies_input_enum_variants.extend(quote! { #variant_name(#param_name), });
                 // Stream bodies always output `()`.
-                bodies_output_enum_variants.extend(quote! { #variant_name, });
                 bodies_match_arms.extend(quote! {
                     #private_module_name::ArmsInput::#variant_name(#pattern) => {
                         let _: () = #body;
-                        #[allow(unreachable_code)]
-                        #private_module_name::ArmsOutput::#variant_name
                     }
                 });
                 if let Some(finally) = finally {
                     let variant_name = format_ident!("Arm{i}Finally");
                     // Stream finally expressions have no input.
                     bodies_input_enum_variants.extend(quote! { #variant_name, });
-                    bodies_output_enum_generic_params.extend(quote! { #param_name, });
-                    bodies_output_enum_variants.extend(quote! { #variant_name(#param_name), });
                     bodies_match_arms.extend(quote! {
                         #private_module_name::ArmsInput::#variant_name => {
                             let #output_temporary = {
                                 #finally
                             };
                             #[allow(unreachable_code)]
-                            #private_module_name::ArmsOutput::#variant_name(#output_temporary)
+                            {
+                                #arm_output = Some(#output_temporary);
+                            }
                         }
                     });
                 }
@@ -358,7 +354,6 @@ impl ToTokens for JoinMeMaybe {
         let run_body_fn = format_ident!("run_body_fn", span = Span::mixed_site());
         let run_body_future = format_ident!("run_body_future", span = Span::mixed_site());
         let run_body_no_return = format_ident!("run_body_no_return", span = Span::mixed_site());
-        let run_body_enum_output = format_ident!("run_body_enum_output", span = Span::mixed_site());
         let mut run_body_tokens = TokenStream2::new();
         if has_bodies {
             let mut canceller_muts = TokenStream2::new();
@@ -393,25 +388,23 @@ impl ToTokens for JoinMeMaybe {
                     pub enum ArmsInput<#bodies_input_enum_generic_params> {
                         #bodies_input_enum_variants
                     }
-                    pub enum ArmsOutput<#bodies_output_enum_generic_params> {
-                        #bodies_output_enum_variants
-                    }
                 }
                 #canceller_muts
                 let #run_body_no_return = ::core::sync::atomic::AtomicBool::new(false);
-                let mut #run_body_enum_output = ::core::option::Option::None;
-                let mut #run_body_fn = async |#item, #run_body_enum_output: &mut ::core::option::Option<_>| {
-                    *#run_body_enum_output = Some(match #item {
+                let mut #run_body_fn = async |#item| {
+                    match #item {
                         #bodies_match_arms
-                    });
+                    }
                     // If one of the arms short-circuits with `return` or `?`, that becomes the
                     // output of `#run_body_future`, and we'll collect it when we poll. If not,
-                    // we'll write its value through the enum out param, set the no_return flag
-                    // (which we can read without dropping the `#run_body_future`), and block
-                    // forever on `pending` (to avoid needing to conjure up a return value of the
-                    // right type).
-                    #run_body_no_return.store(true, ::core::sync::atomic::Ordering::Relaxed);
-                    ::core::future::pending().await
+                    // we'll set the no_return flag (which we can read without dropping the
+                    // `#run_body_future`) and block forever on `pending` (to avoid needing to
+                    // conjure up a return value of the right type).
+                    #[allow(unreachable_code)]
+                    {
+                        #run_body_no_return.store(true, ::core::sync::atomic::Ordering::Relaxed);
+                        ::core::future::pending().await
+                    }
                 };
                 // XXX: Morally we should `pin!` this. However, if we do, then we won't be able to
                 // `drop()` it. We need explicit drops below so that the new body future doesn't
@@ -570,7 +563,6 @@ impl ToTokens for JoinMeMaybe {
         // The run bodies loop. As long as there are items available, and we don't have an existing
         // `#run_body_future` that's returned `Pending`, keep trying to consume items.
         let mut try_to_call_run_body = TokenStream2::new();
-        let mut handle_body_output_arms = TokenStream2::new();
         // We need to keep looping without returning `Pending` if running bodies might've unblocked
         // some of the scrutinees. This can happen when an item is consumed from a stream.
         let item_consumed_from_live_stream =
@@ -579,7 +571,6 @@ impl ToTokens for JoinMeMaybe {
             let arm = &self.arms[i];
             let arm_name = &arm_names[i];
             let arm_item = &arm_items[i];
-            let arm_output = &arm_outputs[i];
             if let ArmKind::FutureAndBody { .. } = &arm.kind {
                 let variant_name = format_ident!("Arm{i}");
                 try_to_call_run_body.extend(quote! {
@@ -596,16 +587,8 @@ impl ToTokens for JoinMeMaybe {
                         // (In summary, `... = None` is for soundness, and `drop` is for borrowck.)
                         #run_body_future = None;
                         drop(#run_body_future);
-                        #run_body_future = Some(#run_body_fn(
-                            #private_module_name::ArmsInput::#variant_name(item),
-                            &mut #run_body_enum_output,
-                        ));
+                        #run_body_future = Some(#run_body_fn(#private_module_name::ArmsInput::#variant_name(item)));
                         continue; // Loop again to poll this.
-                    }
-                });
-                handle_body_output_arms.extend(quote! {
-                    #private_module_name::ArmsOutput::#variant_name(output) => {
-                        #arm_output = ::core::option::Option::Some(output);
                     }
                 });
             }
@@ -622,18 +605,12 @@ impl ToTokens for JoinMeMaybe {
                         // SAFETY: See above about `None` and `drop`.
                         #run_body_future = None;
                         drop(#run_body_future);
-                        #run_body_future = Some(#run_body_fn(
-                            #private_module_name::ArmsInput::#variant_name(item),
-                            &mut #run_body_enum_output,
-                        ));
+                        #run_body_future = Some(#run_body_fn(#private_module_name::ArmsInput::#variant_name(item)));
                         if #is_live {
                             #item_consumed_from_live_stream = true;
                         }
                         continue; // Loop again to poll this.
                     }
-                });
-                handle_body_output_arms.extend(quote! {
-                    #private_module_name::ArmsOutput::#variant_name => {}
                 });
                 if finally.is_some() {
                     let variant_name = format_ident!("Arm{i}Finally");
@@ -644,17 +621,9 @@ impl ToTokens for JoinMeMaybe {
                             // SAFETY: See above about `None` and `drop`.
                             #run_body_future = None;
                             drop(#run_body_future);
-                            #run_body_future = Some(#run_body_fn(
-                                #private_module_name::ArmsInput::#variant_name,
-                                &mut #run_body_enum_output,
-                            ));
+                            #run_body_future = Some(#run_body_fn(#private_module_name::ArmsInput::#variant_name));
                             #arm_should_run_finally = false;
                             continue; // Loop again to poll this.
-                        }
-                    });
-                    handle_body_output_arms.extend(quote! {
-                        #private_module_name::ArmsOutput::#variant_name(output) => {
-                            #arm_output = ::core::option::Option::Some(output);
                         }
                     });
                 }
@@ -686,9 +655,6 @@ impl ToTokens for JoinMeMaybe {
                             #run_body_future = None;
                             drop(#run_body_future);
                             #run_body_future = None;
-                            match #run_body_enum_output.take().expect("output was set right before the flag") {
-                                #handle_body_output_arms
-                            }
                         } else {
                             // The body is pending and has registered a wakeup (i.e. not the
                             // forever `core::future::pending` at the end). End the run bodies
@@ -733,10 +699,22 @@ impl ToTokens for JoinMeMaybe {
             }
         }
 
-        let finished_check = if has_bodies {
-            quote! { #definitely_finished && #run_body_future.is_none() }
+        let finished_check;
+        let drop_run_body_fn;
+        if has_bodies {
+            finished_check = quote! { #definitely_finished && #run_body_future.is_none() };
+            drop_run_body_fn = quote! {
+                // These borrow the output variables, and we need to unwrap those.
+                // SAFETY: See above about `None` and `drop`.
+                #run_body_future = None;
+                drop(#run_body_future);
+                // The closure itself doesn't implement Drop, so it's not strictly necessary to
+                // drop it explicitly, but I think it's clearer.
+                drop(#run_body_fn);
+            };
         } else {
-            quote! { #definitely_finished }
+            finished_check = quote! { #definitely_finished };
+            drop_run_body_fn = quote! {}
         };
         tokens.extend(quote! {
             {
@@ -756,6 +734,7 @@ impl ToTokens for JoinMeMaybe {
                     #run_bodies_loop
                     if #finished_check {
                         // We are DONE!
+                        #drop_run_body_fn
                         break (#return_values);
                     } else if #definitely_finished || !#item_consumed_from_live_stream {
                         // If running bodies didn't unblock any of the scrutinees (either because
