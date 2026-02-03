@@ -549,3 +549,116 @@ async fn test_cancelled_bodies_cancelled() {
     assert!(labeled_started);
     assert!(!labeled_finished);
 }
+
+#[tokio::test]
+async fn test_maybe_stream_body_cancelled() {
+    let mut body_started = false;
+    let mut body_finished = false;
+    join!(
+        sleep(Duration::from_millis(10)),
+        maybe x in stream::iter([1]) => {
+            _ = x;
+            body_started = true;
+            sleep(Duration::from_secs(1_000_000)).await;
+            body_finished = true;
+        },
+    );
+    assert!(body_started);
+    assert!(!body_finished);
+}
+
+#[tokio::test]
+async fn test_maybe_finally_cancelled_mid_execution() {
+    let mut finally_started = false;
+    let mut finally_finished = false;
+    join!(
+        sleep(Duration::from_millis(10)),
+        maybe _ in stream::iter([()]) => {} finally {
+            finally_started = true;
+            sleep(Duration::from_secs(1_000_000)).await;
+            finally_finished = true;
+            42
+        },
+    );
+    assert!(finally_started);
+    assert!(!finally_finished);
+}
+
+#[tokio::test]
+async fn test_labeled_maybe_body_cancelled_explicitly() {
+    let mut started = false;
+    let mut finished = false;
+    join!(
+        async {
+            sleep(Duration::from_millis(10)).await;
+            labeled.cancel();
+        },
+        labeled: maybe _ = ready(()) => {
+            started = true;
+            sleep(Duration::from_secs(1_000_000)).await;
+            finished = true;
+        },
+    );
+    assert!(started);
+    assert!(!finished);
+}
+
+#[tokio::test]
+async fn test_body_self_cancellation() {
+    let mut started = false;
+    let mut finished = false;
+    join!(
+        foo: _ = ready(()) => {
+            started = true;
+            foo.cancel();
+            sleep(Duration::from_secs(1_000_000)).await;
+            finished = true;
+        },
+    );
+    assert!(started);
+    assert!(!finished);
+}
+
+#[tokio::test]
+async fn test_multiple_maybe_bodies_all_cancelled() {
+    let mut started1 = false;
+    let mut finished1 = false;
+    let mut started2 = false;
+    let mut finished2 = false;
+    join!(
+        sleep(Duration::from_millis(10)),
+        maybe _ = ready(()) => {
+            started1 = true;
+            sleep(Duration::from_secs(1_000_000)).await;
+            finished1 = true;
+        },
+        maybe _ = ready(()) => {
+            started2 = true;
+            sleep(Duration::from_secs(1_000_000)).await;
+            finished2 = true;
+        },
+    );
+    assert!(started1);
+    assert!(started2);
+    assert!(!finished1);
+    assert!(!finished2);
+}
+
+#[tokio::test]
+async fn test_stream_body_cancelled_finally_skipped() {
+    let mut body_started = false;
+    let mut finally_ran = false;
+    let ret = join!(
+        sleep(Duration::from_millis(10)),
+        maybe _ in stream::iter([()]) => {
+            body_started = true;
+            sleep(Duration::from_secs(1_000_000)).await;
+        } finally {
+            finally_ran = true;
+            99
+        },
+    );
+    assert!(body_started);
+    assert!(!finally_ran);
+    assert_eq!(ret, ((), None));
+}
