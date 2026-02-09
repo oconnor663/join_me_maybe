@@ -639,7 +639,7 @@ async fn test_multiple_maybe_bodies_all_cancelled() {
         },
     );
     assert!(started1);
-    assert!(started2);
+    assert!(!started2);
     assert!(!finished1);
     assert!(!finished2);
 }
@@ -661,4 +661,23 @@ async fn test_stream_body_cancelled_finally_skipped() {
     assert!(body_started);
     assert!(!finally_ran);
     assert_eq!(ret, ((), None));
+}
+
+#[tokio::test]
+async fn test_maybe_body_skipped() {
+    let mut maybe_body_ran = false;
+    let mut definitely_body_ran = false;
+    let ret = join!(
+        // This maybe arm finishes first, but the definitely arm below finishes immediately after,
+        // so the maybe arm's body does not run.
+        maybe _ = ready(()) => {
+            maybe_body_ran = true;
+        },
+        _ = ready(()) => {
+            definitely_body_ran = true;
+        },
+    );
+    assert!(!maybe_body_ran);
+    assert!(definitely_body_ran);
+    assert_eq!(ret, (None, ()));
 }

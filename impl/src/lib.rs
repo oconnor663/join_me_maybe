@@ -686,17 +686,27 @@ impl ToTokens for JoinMeMaybe {
         }
         let mut run_bodies_loop = TokenStream2::new();
         if has_bodies {
+            let body_is_cancelled = quote! {
+                ((#body_is_maybe && #definitely_finished)
+                    || #body_cancelled_flag.is_some_and(|flag| flag.load(::core::sync::atomic::Ordering::Relaxed)))
+            };
             run_bodies_loop.extend(quote! {
                 loop {
-                    if #run_body_future.is_some() && #body_is_maybe && #definitely_finished {
-                        #run_body_future = None;
-                        drop(#run_body_future);
-                        #run_body_future = None;
-                    }
-                    if #run_body_future.is_some()
-                        && let ::core::option::Option::Some(cancelled) = &#body_cancelled_flag
-                        && cancelled.load(::core::sync::atomic::Ordering::Relaxed)
-                    {
+                    // Check whether the currently running body (if any) is cancelled. We need to
+                    // do this in the loop, rather than just once before entering the loop, because
+                    // we don't check this in #try_to_call_run_body.
+                    if #run_body_future.is_some() && #body_is_cancelled {
+                        // Drop-then-assign means that the old value and the new value don't overlap,
+                        // which actually isn't the case for simple assignment (because the compiler
+                        // has to be defensive about panics). This is necessary when the body closure
+                        // 1) is mutating / AsyncFnMut and 2) needs Drop.
+                        // SAFETY: We are using `Pin::new_unchecked` with this value, so we're
+                        // obligated to drop it in-place. Calling `drop()` technically moves the value
+                        // into drop, which isn't allowed, even though the compiler almost certainly
+                        // elides the move. Instead of relying on that, explicitly overwrite the value
+                        // with `None` first, even though it feels redundant. (In summary, `... = None`
+                        // is for soundness, `drop` is for borrowck, and the second `... = None` is to
+                        // keep the variable initialized.)
                         #run_body_future = None;
                         drop(#run_body_future);
                         #run_body_future = None;
@@ -712,25 +722,25 @@ impl ToTokens for JoinMeMaybe {
                             return output;
                         } else if #run_body_no_return.load(::core::sync::atomic::Ordering::Relaxed) {
                             // Execution of the body closure reached the end of caller code (did
-                            // not diverge), set the `#run_body_no_return` flag, and then blocked
-                            // forever on `core::future::pending`. Read its output from
-                            // `#run_body_enum_output`, and then proceed with this loop to try to
-                            // run more bodies.
+                            // not diverge), it set the `#run_body_no_return` flag, and then it
+                            // blocked forever on `core::future::pending`. Clear that flag and then
+                            // proceed to try to run another body.
                             #run_body_no_return.store(false, ::core::sync::atomic::Ordering::Relaxed);
-                            // SAFETY: See above about `None` and `drop`. This time we need a
-                            // *second* `None` assignment, so that this variable is always
-                            // initialized at the top of the loop.
-                            #run_body_future = None;
-                            drop(#run_body_future);
-                            #run_body_future = None;
+                        } else if #body_is_cancelled {
+                            // The body cancelled *itself*, either directly or by cancelling the
+                            // last of the "definitely" arms. Again proceed to try to run another
+                            // body.
                         } else {
-                            // The body is pending and has registered a wakeup (i.e. not the
-                            // forever `core::future::pending` at the end). End the run bodies
-                            // loop. (The outermost loop might repeat, though, if we've unblocked
-                            // some streams.)
+                            // The body is pending and not cancelled, and presumably it's
+                            // registered a wakeup. End the run bodies loop. (The outermost loop
+                            // might repeat, though, if we've unblocked some streams.)
                             break;
                         }
                     }
+                    // SAFETY: See above about `None` and `drop`.
+                    #run_body_future = None;
+                    drop(#run_body_future);
+                    #run_body_future = None;
                     #try_to_call_run_body
                     if #run_body_future.is_none() {
                         // There are no more items.
@@ -781,7 +791,7 @@ impl ToTokens for JoinMeMaybe {
                 drop(#run_body_fn);
             };
         } else {
-            finished_check = quote! { #definitely_finished };
+            finished_check = definitely_finished.clone();
             drop_run_body_fn = quote! {}
         };
         tokens.extend(quote! {
@@ -804,7 +814,7 @@ impl ToTokens for JoinMeMaybe {
                         // We are DONE!
                         #drop_run_body_fn
                         break (#return_values);
-                    } else if #definitely_finished || !#item_consumed_from_live_stream {
+                    } else if !#item_consumed_from_live_stream {
                         // If running bodies didn't unblock any of the scrutinees (either because
                         // we're done running them, or because no items were consumed from any
                         // streams), then we can't make further progress right now, and we need to
