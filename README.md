@@ -134,7 +134,41 @@ async fn foo() -> std::io::Result<()> {
 Shared mutation from different arm bodies wouldn't be possible if they ran concurrently.
 Instead, `join!` only runs one arm body at a time. This is a potential source of surprising
 timing bugs, and it's best to avoid `.await`ing in arm bodies if you have a choice. However,
-arm bodies and "scrutinees" (the futures to the left of the `=>`) run concurrently.
+"scrutinees" futures (the ones to left of the `=>`) do run concurrently, both with each other
+and with the one running body. Cancelling an arm also cancels its body, if that body is
+running:
+
+```rust
+let mut first_body_started = false;
+let mut first_body_finished = false;
+let mut second_body_ran = false;
+join!(
+    first: _ = std::future::ready(1) => {
+        // This body executes first (because the "scrutinee" future `ready(1)` finishes
+        // immediately), and it tries to sleep ~forever, but `first.cancel()` below ends up
+        // cancelling it.
+        first_body_started = true;
+        sleep(Duration::from_secs(1_000_000)).await;
+        first_body_finished = true;
+    },
+    maybe _ = std::future::ready(2) => {
+        // This body never runs. Initially it waits for the first body, because only one
+        // body runs at a time. After the first body is cancelled, there are no more
+        // "definitely" arms left, so this "maybe" arm is also implicitly cancelled, even
+        // though by that point the "scrutinee" future `ready(2)` has already finished.
+        second_body_ran = true;
+    },
+    async {
+        // This is a "scrutinee" future, not an arm body, so it runs concurrently with the
+        // first body above and successfully cancels it.
+        sleep(Duration::from_millis(10)).await;
+        first.cancel();
+    },
+);
+assert!(first_body_started);
+assert!(!first_body_finished);
+assert!(!second_body_ran);
+```
 
 ### streams
 
@@ -162,15 +196,23 @@ default, but streams with a `finally` expression take the value of that expressi
 let ret = join!(
     // This stream has no `finally` expression, so it returns `()`.
     _ in stream::iter([42]) => {},
-    // This arm's `finally` expression is `1`, and the `maybe` means we get `Some(1)`.
-    maybe _ in stream::iter([42]) => {} finally 1,
-    // Same, but without `maybe` we get the unwrapped value.
-    _ in stream::iter([42]) => {} finally 2,
-    // All the streams above finish immediately, so this `maybe` stream gets cancelled and
-    // returns `None` instead of evaluating its `finally` expression.
+    // This stream has a `finally` expression.
+    _ in stream::iter([42]) => {} finally 1,
+    // This stream has a `finally` block that awaits.
+    _ in stream::iter([42]) => {} finally {
+        std::future::ready(2).await
+    },
+    // This `maybe` arm has its `finally` expression wrapped in an `Option`.
     maybe _ in stream::iter([42]) => {} finally 3,
+    // Sleep to give the `maybe` arms above time to run.
+    sleep(Duration::from_millis(10)),
+    // This `maybe` arm's `finally` block gets cancelled when the sleep above finishes.
+    maybe _ in stream::iter([42]) => {} finally {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        2
+    },
 );
-assert_eq!(ret, ((), Some(1), 2, None));
+assert_eq!(ret, ((), 1, 2, Some(3), (), None));
 ```
 
 Here's an example of driving a stream together with `label:`/`.cancel()`, which works with
@@ -202,14 +244,15 @@ assert_eq!(counter, 3);
 ### mutable access to futures and streams
 
 This feature is even more experimental than everything else above. In arm bodies
-(blocks/expressions after `=>` and `finally`), `label:` cancellers support an additional
-method: `with_pin_mut`. This takes a closure and invokes it with an `Option<Pin<&mut T>>`
-pointing to the corresponding future or stream. (`None` if that arm is already completed or
-cancelled.) You can use this to mutate e.g. a [`FuturesUnordered`] or a [`StreamMap`] to add
-more work to it while it's being polled. (Not literally while it's being polled -- everything
-in a `join!` runs on one thread -- but while it's owned by `join!` and guaranteed not to be
-"snoozed".) This is intended as an alternative to patterns that await futures *by reference*,
-which tends to be prone to "snoozing" mistakes.
+(blocks/expressions after `=>` and `finally`), `label:` cancellers support a couple additional
+methods: `with_pin_mut` and (for `Unpin` types) `with_mut`. These take a closure and invoke it
+with an `Option<Pin<&mut T>>` (`Option<&mut T>` respectively) pointing to the corresponding
+future or stream, or `None` if that arm is already completed or cancelled. You can use this to
+mutate e.g. a [`FuturesUnordered`] or a [`StreamMap`] to add more work to it while it's being
+polled. (Not literally while it's being polled -- everything in a `join!` runs on one thread --
+but while it's owned by `join!` and guaranteed not to be "snoozed".) This is intended as an
+alternative to patterns that await futures *by reference*, which tends to be prone to
+"snoozing" mistakes.
 
 Unfortunately, streams that you can add work to dynamically are usually "poorly behaved" in the
 sense that they often return `Ready(None)` for a while, until more work is eventually added and

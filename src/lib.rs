@@ -154,7 +154,46 @@
 //! Shared mutation from different arm bodies wouldn't be possible if they ran concurrently.
 //! Instead, `join!` only runs one arm body at a time. This is a potential source of surprising
 //! timing bugs, and it's best to avoid `.await`ing in arm bodies if you have a choice. However,
-//! arm bodies and "scrutinees" (the futures to the left of the `=>`) run concurrently.
+//! "scrutinees" futures (the ones to left of the `=>`) do run concurrently, both with each other
+//! and with the one running body. Cancelling an arm also cancels its body, if that body is
+//! running:
+//!
+//! ```
+//! # use join_me_maybe::join;
+//! # use tokio::time::{sleep, Duration};
+//! # #[tokio::main]
+//! # async fn main() {
+//! let mut first_body_started = false;
+//! let mut first_body_finished = false;
+//! let mut second_body_ran = false;
+//! join!(
+//!     first: _ = std::future::ready(1) => {
+//!         // This body executes first (because the "scrutinee" future `ready(1)` finishes
+//!         // immediately), and it tries to sleep ~forever, but `first.cancel()` below ends up
+//!         // cancelling it.
+//!         first_body_started = true;
+//!         sleep(Duration::from_secs(1_000_000)).await;
+//!         first_body_finished = true;
+//!     },
+//!     maybe _ = std::future::ready(2) => {
+//!         // This body never runs. Initially it waits for the first body, because only one
+//!         // body runs at a time. After the first body is cancelled, there are no more
+//!         // "definitely" arms left, so this "maybe" arm is also implicitly cancelled, even
+//!         // though by that point the "scrutinee" future `ready(2)` has already finished.
+//!         second_body_ran = true;
+//!     },
+//!     async {
+//!         // This is a "scrutinee" future, not an arm body, so it runs concurrently with the
+//!         // first body above and successfully cancels it.
+//!         sleep(Duration::from_millis(10)).await;
+//!         first.cancel();
+//!     },
+//! );
+//! assert!(first_body_started);
+//! assert!(!first_body_finished);
+//! assert!(!second_body_ran);
+//! # }
+//! ```
 //!
 //! ## streams
 //!
