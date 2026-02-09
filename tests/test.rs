@@ -681,3 +681,72 @@ async fn test_maybe_body_skipped() {
     assert!(definitely_body_ran);
     assert_eq!(ret, (None, ()));
 }
+
+#[tokio::test]
+async fn test_maybe_body_cancels_last_definitely_arm() {
+    let mut maybe_finished = false;
+    join!(
+        foo: sleep(Duration::from_secs(1_000_000)),
+        maybe _ = ready(()) => {
+            foo.cancel();
+            sleep(Duration::from_millis(10)).await;
+            maybe_finished = true;
+        },
+    );
+    assert!(!maybe_finished);
+}
+
+#[tokio::test]
+async fn test_self_cancel_immediately_ready() {
+    let ret = join!(
+        foo: _ = ready(()) => {
+            foo.cancel();
+            42
+        },
+    );
+    assert_eq!(ret, (Some(42),));
+}
+
+#[tokio::test]
+async fn test_labeled_stream_body_self_cancellation() {
+    join!(
+        foo: _ in stream::iter([1]) => {
+            foo.cancel();
+            sleep(Duration::from_secs(1_000_000)).await;
+        },
+    );
+}
+
+#[tokio::test]
+async fn test_cancel_from_finally_block() {
+    let ret = join!(
+        bar: sleep(Duration::from_secs(1_000_000)),
+        _ in stream::iter([()]) => {} finally bar.cancel(),
+    );
+    assert_eq!(ret, (None, ()));
+}
+
+#[tokio::test]
+async fn test_labeled_definitely_stream_body_cancelled() {
+    let mut body_started = false;
+    let mut body_finished = false;
+    let mut finally_ran = false;
+    let ret = join!(
+        async {
+            sleep(Duration::from_millis(10)).await;
+            labeled.cancel();
+        },
+        labeled: _ in stream::iter([1]) => {
+            body_started = true;
+            sleep(Duration::from_secs(1_000_000)).await;
+            body_finished = true;
+        } finally {
+            finally_ran = true;
+            99
+        },
+    );
+    assert!(body_started);
+    assert!(!body_finished);
+    assert!(!finally_ran);
+    assert_eq!(ret, ((), None));
+}
