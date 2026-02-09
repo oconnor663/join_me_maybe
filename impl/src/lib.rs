@@ -483,12 +483,12 @@ impl ToTokens for JoinMeMaybe {
                     quote! {
                         match ::join_me_maybe::_impl::PollNextOnce(#future_or_stream).await {
                             ::core::task::Poll::Ready(::core::option::Option::Some(item)) => {
-                                // The has yielded an item, which needs to be consumed by the body.
-                                // We're returning `false` here, because the stream isn't finished,
-                                // but note that we haven't registered a wakeup. If the body
-                                // closure consumes this item, it will rerun the whole top-level
-                                // loop, to give us a chance to poll this stream again. See
-                                // `#item_consumed_from_live_stream`.
+                                // The stream has yielded an item, which needs to be consumed by
+                                // the body. We're returning `false` here, because the stream isn't
+                                // finished, but note that we haven't registered a wakeup. If the
+                                // body closure consumes this item, it will rerun the whole
+                                // top-level loop, to give us a chance to poll this stream again.
+                                // See `#item_consumed_from_live_stream`.
                                 #arm_item = ::core::option::Option::Some(item);
                                 false
                             }

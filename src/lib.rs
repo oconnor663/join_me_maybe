@@ -197,7 +197,7 @@
 //!     _ in stream::iter([42]) => {} finally {
 //!         std::future::ready(2).await
 //!     },
-//!     // This `maybe` arm's has its `finally` expression wrapped in an `Option`.
+//!     // This `maybe` arm has its `finally` expression wrapped in an `Option`.
 //!     maybe _ in stream::iter([42]) => {} finally 3,
 //!     // Sleep to give the `maybe` arms above time to run.
 //!     sleep(Duration::from_millis(10)),
