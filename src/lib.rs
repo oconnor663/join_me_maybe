@@ -294,22 +294,24 @@
 //! alternative to patterns that await futures *by reference*, which tends to be prone to
 //! "snoozing" mistakes.
 //!
-//! Unfortunately, streams that you can add work to dynamically are usually "poorly behaved" in the
-//! sense that they often return `Ready(None)` for a while, until more work is eventually added and
-//! they start returning `Ready(Some(_))` again. This is at odds with the [usual rule] that you
-//! shouldn't poll a stream again after it returns `Ready(None)`, but it does work with
-//! `select!`-in-a-loop. (In Tokio it requires an `if` guard, and with `futures::select!` it leans
-//! on the "fused" requirement.) However, it does _not_ naturally work with `join_me_maybe`, which
-//! interprets `Ready(None)` as "end of stream" and promptly drops the whole stream. ([Like it's
-//! supposed to!][usual rule]) For a stream to work well with this feature, it needs to do two
-//! things that as far as I know none of the dynamic streams currently do:
+//! Unfortunately, streams that you can add input to dynamically are often "poorly behaved" in that
+//! that they can return `Ready(None)` for a while, until more work is added and they start
+//! returning `Ready(Some(_))` again. This is at odds with the [usual rule] that you shouldn't poll
+//! a stream again after it returns `Ready(None)`, but it does work with `select!`-in-a-loop. (In
+//! Tokio it requires an `if` guard, and with `futures::select!` it leans on the "fused"
+//! requirement.) However, it does _not_ naturally work with `join_me_maybe`, which interprets
+//! `Ready(None)` as "end of stream" and promptly drops the whole stream. ([Like it's supposed
+//! to!][usual rule]) For a stream to work well with this feature, it needs to behave like a
+//! channel:
 //!
-//! 1. The stream should only ever return `Ready(Some(_))` or `Pending`, until you somehow inform
-//!    it that no more work is coming, using e.g. a `.close()` method or something like that. After
-//!    that the stream should probably drain its remaining work before returning `Ready(None)`. (If
-//!    the caller doesn't want to wait for remaining work, they can cancel the stream instead.)
-//! 2. Because adding more work might unblock callers that previously received `Pending`, the
-//!    stream should stash a `Waker` and invoke it whenever work is added.
+//! 1. Polling the stream should only ever return `Ready(Some(_))` or `Pending`, until you tell it
+//!    that no more input is coming, for example by dropping some sort of writer or calling some
+//!    sort of close method. After that the stream should drain its remaining output before
+//!    returning `Ready(None)`. (Callers who don't care about draining output can cancel the
+//!    stream.)
+//!
+//! 2. Because adding input can unblock callers who previously received `Pending`, the stream should
+//!    stash a `Waker` and generally invoke it when input is added.
 //!
 //! Adapting a stream that doesn't behave this way is complicated and not obviously a good idea.
 //! [See `tests/test.rs` for some examples.][adapter] Manually tracking `Waker`s is exactly the
