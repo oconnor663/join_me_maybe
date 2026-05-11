@@ -12,4 +12,3 @@ note: the lint level is defined here
    |
  1 | #![deny(unreachable_code)]
    |         ^^^^^^^^^^^^^^^^
-   = note: this error originates in the macro `$crate::print` which comes from the expansion of the macro `println` (in Nightly builds, run with -Z macro-backtrace for more info)
