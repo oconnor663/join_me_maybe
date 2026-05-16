@@ -413,7 +413,7 @@ pub use join_me_maybe_impl::join;
 /// The type that provides the `.cancel()` method for labeled arguments
 pub struct Canceller<'a> {
     cancelled: &'a AtomicBool,
-    finished: Option<&'a AtomicBool>, // only set for "definitely" arms
+    finished: Option<&'a AtomicBool>, // only Some for "definitely" arms
     definitely_count: &'a AtomicUsize,
 }
 
@@ -527,7 +527,7 @@ pub mod _impl {
         }
     }
 
-    // `futures` has `poll!`, but it doesn't have a stream version. The macros is also kind of
+    // `futures` has `poll!`, but it doesn't have a stream version. The macro is also kind of
     // gross, so just adapt it into a couple wrapper structs
     pub struct PollOnce<Fut: Future + Unpin>(pub Fut);
 

@@ -155,10 +155,35 @@ impl Parse for JoinMeMaybe {
     }
 }
 
+/// IMPORTANT BEHAVIORS, INVARIANTS, AND IMPLEMENTATION DETAILS
+/// -----------------------------------------------------------
+///
+/// I'm not sure where else to write these down, so I'll write them here.
+///
+/// - All the "maybe" arms are cancelled as soon as the "definitely" *scrutinees* are finished, not
+/// necessarily all of the "definitely" bodies or finally expressions. This is why we need to track
+/// the (definitely scrutinee) "finished" state and the (whole arm) "cancelled" state separately.
+///
+/// - Cancelling an arm also cancels its body if it's in-flight. This behaves the same way whether
+/// it's `.cancel()` or implicit "maybe" cancellation. That means a "definitely" scrutinee
+/// finishing can implicitly cancel a running "maybe" body.
+///
+/// - Cancelled arms never get polled again, and they also get dropped promptly, before the next
+/// time the macro yields to its caller. The same applies to their running bodies, and also to any
+/// pending items that they've yielded (i.e. if the body is ready to start but hasn't yet started).
+///
+/// - But note that `.cancel()` doesn't drop anything immediately/directly, because we need to
+/// support the case where an arm cancels itself.
+///
+/// - If there are blocking/wakeup relationships between different arms, the normal `Waker`
+/// machinery handles that, and we don't need to worry about it. (I.e. if one arm releases a
+/// `Mutex` that another arm wants to take, the whole macro is going to get polled again.) However,
+/// we need to be careful about ways that the macro itself can unblock one of its arms without
+/// invoking a waker. Currently the only case of that is when consuming a stream item unblocks the
+/// stream that produced it.
 impl ToTokens for JoinMeMaybe {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
-        // Define the finished flags and cancellers. The finished flags get set to true whenever an
-        // arm finishes naturally (poll returns Ready) *or* another arm cancels it.
+        // Define the finished flags and cancellers here at the top.
         let mut initializers = TokenStream2::new();
         let total_definitely = self.arms.iter().filter(|arm| !arm.is_maybe).count();
         let definitely_finished_count =
@@ -378,6 +403,7 @@ impl ToTokens for JoinMeMaybe {
         if has_bodies {
             let mut canceller_muts = TokenStream2::new();
             for i in 0..self.arms.len() {
+                // Instantiate the `CancellerMut`s, which are only visible in a body/finally.
                 if let Some(label) = &self.arms[i].cancel_label {
                     let arm_name = &arm_names[i];
                     let cancelled_flag = &cancelled_flag_names[i];
@@ -544,8 +570,9 @@ impl ToTokens for JoinMeMaybe {
                     }
                 });
             } else {
-                // An unlabeled "definitely" future/stream can't be cancelled (other than by
-                // cancelling the whole macro), so we unconditionally bump the count when it exits.
+                // An unlabeled "definitely" future/stream can't be cancelled (other than by a body
+                // short-circuiting the whole macro), so we unconditionally bump the count when it
+                // exits.
                 let bump_count = if !arm.is_maybe {
                     quote! {
                         #definitely_finished_count.fetch_add(1, ::core::sync::atomic::Ordering::Relaxed);
