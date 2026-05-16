@@ -172,6 +172,64 @@ async fn test_stream_items_drop_promptly() {
     assert!(!foo_body_ran);
 }
 
+#[tokio::test]
+async fn test_drop_promptly_within_future_body() {
+    let mutex = tokio::sync::Mutex::new(());
+    let ret = join!(
+        foo: async {
+            let _guard = mutex.lock().await;
+            sleep(Duration::from_secs(1_000_000)).await;
+        },
+        _ = ready(()) => {
+            // Like `test_drop_promptly` above, but from within a future arm body.
+            foo.cancel();
+            let _guard = mutex.lock().await;
+            assert!(foo.with_pin_mut(|foo| foo.is_none()));
+            42
+        }
+    );
+    assert_eq!(ret, (None, 42));
+}
+
+#[tokio::test]
+async fn test_drop_promptly_within_stream_body() {
+    let mutex = tokio::sync::Mutex::new(());
+    let mut evidence = None;
+    join!(
+        foo: async {
+            let _guard = mutex.lock().await;
+            sleep(Duration::from_secs(1_000_000)).await;
+        },
+        _ in stream::iter([()]) => {
+            // Like `test_drop_promptly` above, but from within a stream arm body.
+            foo.cancel();
+            let _guard = mutex.lock().await;
+            assert!(foo.with_pin_mut(|foo| foo.is_none()));
+            evidence = Some(42);
+        }
+    );
+    assert_eq!(evidence, Some(42));
+}
+
+#[tokio::test]
+async fn test_drop_promptly_within_stream_finally() {
+    let mutex = tokio::sync::Mutex::new(());
+    let ret = join!(
+        foo: async {
+            let _guard = mutex.lock().await;
+            sleep(Duration::from_secs(1_000_000)).await;
+        },
+        _ in stream::iter(0..3) => {} finally {
+            // Like `test_drop_promptly` above, but from within a stream finally.
+            foo.cancel();
+            let _guard = mutex.lock().await;
+            assert!(foo.with_pin_mut(|foo| foo.is_none()));
+            42
+        }
+    );
+    assert_eq!(ret, (None, 42));
+}
+
 // Most of the cases above rely on simple `ready` futures, but here we do at least one case that
 // actually returns `Pending` before eventually returning `ready`.
 #[tokio::test]
