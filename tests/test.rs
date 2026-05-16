@@ -291,6 +291,63 @@ async fn test_stream_arms() {
     assert_eq!(ret, ((), (), ()));
 }
 
+#[tokio::test]
+async fn test_stream_body_sleep_does_not_miss_items() {
+    let mut elements = Vec::new();
+    join!(
+        x in stream::iter(0..3) => {
+            sleep(Duration::from_millis(1)).await;
+            elements.push(x);
+        },
+    );
+    assert_eq!(elements, [0, 1, 2]);
+}
+
+#[tokio::test]
+async fn test_stream_body_sleep_does_not_miss_other_stream_items() {
+    let mut slow_elements = Vec::new();
+    let mut fast_elements = Vec::new();
+    join!(
+        x in stream::iter(0..3) => {
+            sleep(Duration::from_millis(1)).await;
+            slow_elements.push(x);
+        },
+        x in stream::iter(0..3) => {
+            fast_elements.push(x);
+        },
+    );
+    assert_eq!(slow_elements, [0, 1, 2]);
+    assert_eq!(fast_elements, [0, 1, 2]);
+}
+
+#[tokio::test]
+async fn test_future_body_sleep_does_not_miss_stream_items() {
+    let mut elements = Vec::new();
+    join!(
+        _ = ready(()) => {
+            sleep(Duration::from_millis(1)).await;
+        },
+        x in stream::iter(0..3) => {
+            elements.push(x);
+        },
+    );
+    assert_eq!(elements, [0, 1, 2]);
+}
+
+#[tokio::test]
+async fn test_finally_sleep_does_not_miss_stream_items() {
+    let mut elements = Vec::new();
+    join!(
+        _ in stream::empty::<()>() => {} finally {
+            sleep(Duration::from_millis(1)).await;
+        },
+        x in stream::iter(0..3) => {
+            elements.push(x);
+        },
+    );
+    assert_eq!(elements, [0, 1, 2]);
+}
+
 fn resuming<S>(stream: S) -> ResumingStream<S> {
     ResumingStream {
         stream: Box::pin(stream),
