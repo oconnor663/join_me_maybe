@@ -40,9 +40,7 @@ async fn test_cancel() {
             bar.cancel();
             5
         },
-        // Without the leading underscore here you get an unused variable warning. See
-        // `tests/ui/unused_label.rs`.
-        _unused_label: maybe ready(6),
+        baz: maybe ready(6),
     );
     assert_eq!(ret, (Some(0), 1, None, None, Some(4), 5, None));
 }
@@ -81,24 +79,97 @@ async fn test_cancel_already_finished() {
 
 #[tokio::test]
 async fn test_drop_promptly() {
-    let mutex = tokio::sync::Mutex::new(());
+    let mutex1 = tokio::sync::Mutex::new(());
+    let mutex2 = tokio::sync::Mutex::new(());
+    let mutex3 = tokio::sync::Mutex::new(());
     let ret = join!(
         foo: async {
             // Polling order is (currently) deterministic, so this arm definitely gets the lock
             // here. If that ever changes we could acquire the guard above and move it in here.
-            let _guard = mutex.lock().await;
+            let _guard = mutex1.lock().await;
             // This arm tries to sleep "forever" while holding the lock. The other arm isn't happy
             // about that.
             sleep(Duration::from_secs(1_000_000)).await;
         },
-        async {
+        // These maybe arms should get cancelled automatically when the last arm reaches its body.
+        // Test both an unlabeled one and a labeled one.
+        maybe async {
+            let _guard = mutex2.lock().await;
+            sleep(Duration::from_secs(1_000_000)).await;
+        },
+        bar: maybe async {
+            let _guard = mutex3.lock().await;
+            sleep(Duration::from_secs(1_000_000)).await;
+        },
+        _ = async {
             // Take the lock from foo...by force!
             foo.cancel();
             // If cancelling `foo` doesn't drop its future promptly, this will deadlock.
-            _ = mutex.lock().await;
+            let _guard = mutex1.lock().await;
+        } => {
+            // Now all the definitely scrutinees are finished, so the maybe arms should also get
+            // cancelled and promptly dropped.
+            let _guard = mutex2.lock().await;
+            let _guard = mutex3.lock().await;
         }
     );
-    assert_eq!(ret, (None, ()));
+    assert_eq!(ret, (None, None, None, ()));
+}
+
+#[tokio::test]
+async fn test_future_items_drop_promptly() {
+    let mutex = tokio::sync::Mutex::new(());
+    let mut foo_guard_acquired = false;
+    let mut foo_body_ran = false;
+    join!(
+        maybe _ = ready(()) => {
+            // This maybe body runs forever, preventing the `foo` body from starting.
+            sleep(Duration::from_secs(1_000_000)).await;
+        },
+        // `_guard` gets acquired immediately here...
+        foo: _guard = async {
+            let guard = mutex.lock().await;
+            foo_guard_acquired = true;
+            guard
+        } => {
+            // ...but we cancel this body before it ever gets a chance to run.
+            foo_body_ran = true;
+        },
+        async {
+            foo.cancel();
+            // The `foo` body will never run, which means we need to promptly drop the guard
+            // sitting in its "item" slot. If we forget to do that, this deadlocks.
+            let _guard = mutex.lock().await;
+        }
+    );
+    assert!(foo_guard_acquired);
+    assert!(!foo_body_ran);
+}
+
+#[tokio::test]
+async fn test_stream_items_drop_promptly() {
+    let mutex = tokio::sync::Mutex::new(());
+    let mut foo_guard_acquired = false;
+    let mut foo_body_ran = false;
+    join!(
+        maybe _ = ready(()) => {
+            sleep(Duration::from_secs(1_000_000)).await;
+        },
+        // Just like `test_future_items_drop_promptly` above, but using a stream here instead.
+        foo: _guard in stream::once(async {
+            let guard = mutex.lock().await;
+            foo_guard_acquired = true;
+            guard
+        }) => {
+            foo_body_ran = true;
+        },
+        async {
+            foo.cancel();
+            let _guard = mutex.lock().await;
+        }
+    );
+    assert!(foo_guard_acquired);
+    assert!(!foo_body_ran);
 }
 
 // Most of the cases above rely on simple `ready` futures, but here we do at least one case that

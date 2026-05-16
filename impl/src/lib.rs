@@ -573,28 +573,47 @@ impl ToTokens for JoinMeMaybe {
         // *dropped promptly*. Consider a case where one arm is holding an async lock, and another
         // arm is trying to acquire it. If the first arm is cancelled but not dropped, then the
         // second arm will deadlock. See "Futurelock": https://rfd.shared.oxide.computer/rfd/0609.
-        let mut cancel_all = TokenStream2::new();
-        let mut cancel_labeled = TokenStream2::new();
+        let mut drop_maybe = TokenStream2::new();
+        let mut drop_labeled = TokenStream2::new();
         for i in 0..self.arms.len() {
+            let arm = &self.arms[i];
             let cancelled_flag = &cancelled_flag_names[i];
             let arm_pin = &arm_pins[i];
-            cancel_all.extend(quote! {
-                #arm_pin.set(::core::option::Option::None);
-            });
+            // An even subtler version of the same rule is that arm *items* must also get dropped
+            // promptly. These are the ready values of future arms with bodies, or the items
+            // yielded from streams. These need to get dropped as soon as we know the corresponding
+            // body will never run. It's rare that this matters, but the value of a future could be
+            // for example a `MutexGuard`.
+            let mut drop_item = TokenStream2::new();
+            if matches!(
+                arm.kind,
+                ArmKind::FutureAndBody { .. } | ArmKind::StreamAndBody { .. },
+            ) {
+                let arm_item = &arm_items[i];
+                drop_item.extend(quote! {
+                    #arm_item = None;
+                });
+            }
+            if arm.is_maybe {
+                drop_maybe.extend(quote! {
+                    #arm_pin.set(::core::option::Option::None);
+                    #drop_item
+                });
+            }
             if self.arms[i].cancel_label.is_some() {
-                cancel_labeled.extend(quote! {
+                drop_labeled.extend(quote! {
                     if #cancelled_flag.load(::core::sync::atomic::Ordering::Relaxed) {
                         #arm_pin.set(::core::option::Option::None);
+                        #drop_item
                     }
                 });
             }
         }
-        let cancelling = quote! {
+        let drop_cancelled = quote! {
             if #definitely_finished {
-                #cancel_all
-            } else {
-                #cancel_labeled
+                #drop_maybe
             }
+            #drop_labeled
         };
 
         // The run bodies loop. As long as there are items available, and we don't have an existing
@@ -806,8 +825,12 @@ impl ToTokens for JoinMeMaybe {
                             #polling_and_counting
                             break;
                         }
-                        #cancelling
                     }
+                    // Drop any cancelled scrutinees (either labeled cancellation, or "maybe" arms
+                    // after the "definitely" scrutinees have finished). Also drop any pending
+                    // items belonging to those arms. If a cancelled body is currently running, it
+                    // will drop in #run_bodies_loop below.
+                    #drop_cancelled
                     let mut #item_consumed_from_live_stream = false;
                     #run_bodies_loop
                     if #finished_check {
