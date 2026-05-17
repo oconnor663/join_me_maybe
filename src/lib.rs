@@ -263,7 +263,7 @@
 //! let mut counter = 0;
 //! join!(
 //!     my_stream: _ in stream::iter(0..5).then(async |_| {
-//!         sleep(Duration::from_millis(10)).await
+//!         sleep(Duration::from_millis(20)).await
 //!     }) => {
 //!         // This stream gets cancelled below, so this only executes three times.
 //!         counter += 1;
@@ -273,7 +273,7 @@
 //!     },
 //!     async {
 //!         // Wait long enough for the stream to yield three items, then cancel it.
-//!         sleep(Duration::from_millis(35)).await;
+//!         sleep(Duration::from_millis(70)).await;
 //!         my_stream.cancel();
 //!     },
 //! );
