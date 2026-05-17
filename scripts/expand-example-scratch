@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""Expand examples into scratch crates for easier macro type-error debugging.
+
+`cargo expand` is useful for localizing errors in generated macro code, but the
+raw output is awkward to compile directly: it needs nightly feature gates, it
+needs Cargo to provide this crate's dev dependencies, and putting scratch files
+under `examples/` makes normal Cargo commands pick them up later. This helper
+expands one or more examples, patches in the required crate attributes, writes a
+throwaway Cargo package under `target/expand-scratch/`, and runs it with nightly
+Cargo. By default it tries the examples from simplest to most complicated and
+stops at the first failure.
+"""
+
+import subprocess
+import sys
+from pathlib import Path
+
+
+SCRATCH_MANIFEST = """\
+[package]
+name = "join-me-maybe-expand-scratch"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+join_me_maybe = { path = "../../.." }
+futures = "0.3"
+tokio = { version = "1.48.0", features = ["full"] }
+tokio-stream = "0.1.17"
+"""
+
+SCRATCH_TOOLCHAIN = """\
+[toolchain]
+channel = "nightly"
+"""
+
+
+def patch_expanded_source(expanded: str) -> str:
+    lines = expanded.splitlines(keepends=True)
+    allow_warnings = (
+        "#![allow(\n"
+        "    dropping_copy_types,\n"
+        "    internal_features,\n"
+        "    unused_features,\n"
+        "    unused_imports,\n"
+        "    unused_mut,\n"
+        "    unused_parens,\n"
+        ")]\n"
+    )
+    if not lines:
+        return '#![feature(prelude_import, super_let, panic_internals)]\n' + allow_warnings
+
+    first = lines[0].strip()
+    if first == "#![feature(prelude_import)]":
+        lines.insert(1, "#![feature(super_let, panic_internals)]\n")
+        lines.insert(2, allow_warnings)
+    else:
+        lines.insert(0, "#![feature(prelude_import, super_let, panic_internals)]\n")
+        lines.insert(1, allow_warnings)
+    return "".join(lines)
+
+
+def run_example(example: str) -> None:
+    scratch_name = example.replace("-", "_")
+    scratch_dir = Path("target") / "expand-scratch" / scratch_name
+    scratch_src = scratch_dir / "src" / "main.rs"
+    scratch_manifest = scratch_dir / "Cargo.toml"
+    scratch_toolchain = scratch_dir / "rust-toolchain.toml"
+
+    print(f"==> expanding example: {example}", flush=True)
+    expanded = subprocess.run(
+        ["cargo", "expand", "--example", example],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout
+
+    scratch_src.parent.mkdir(parents=True, exist_ok=True)
+    scratch_manifest.write_text(SCRATCH_MANIFEST)
+    scratch_toolchain.write_text(SCRATCH_TOOLCHAIN)
+    scratch_src.write_text(patch_expanded_source(expanded))
+
+    print(f"==> wrote {scratch_src}", flush=True)
+    print(
+        f"==> running: cd {scratch_dir} && cargo run --offline",
+        flush=True,
+    )
+    subprocess.run(
+        [
+            "cargo",
+            "run",
+            "--offline",
+        ],
+        cwd=scratch_dir,
+        check=True,
+    )
+
+
+def main() -> None:
+    examples = sys.argv[1:] or ["short", "bodies", "finally"]
+    for example in examples:
+        run_example(example)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(error.returncode)
