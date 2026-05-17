@@ -853,13 +853,13 @@ impl ToTokens for JoinMeMaybe {
                             break;
                         }
                     }
-                    // Drop any cancelled scrutinees (either labeled cancellation, or "maybe" arms
-                    // after the "definitely" scrutinees have finished). Also drop any pending
-                    // items belonging to those arms. If a cancelled body is currently running, it
-                    // will drop in #run_bodies_loop below.
-                    #drop_cancelled
                     let mut #item_consumed_from_live_stream = false;
                     #run_bodies_loop
+                    // Drop any cancelled scrutinees (either labeled cancellation, or "maybe" arms
+                    // after the "definitely" scrutinees have finished). Also drop any pending
+                    // items belonging to those arms. If a running body was cancelled, it dropped
+                    // in #run_bodies_loop above.
+                    #drop_cancelled
                     if #finished_check {
                         // We are DONE!
                         #drop_run_body_fn
