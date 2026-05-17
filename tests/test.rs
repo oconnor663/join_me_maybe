@@ -1,6 +1,7 @@
 use futures::stream::FuturesUnordered;
 use futures::{Stream, StreamExt, stream};
 use join_me_maybe::join;
+use std::cell::Cell;
 use std::future::ready;
 use std::hash::Hash;
 use std::pin::Pin;
@@ -935,4 +936,26 @@ async fn test_labeled_definitely_stream_body_cancelled() {
     assert!(!body_finished);
     assert!(!finally_ran);
     assert_eq!(ret, ((), None));
+}
+
+#[tokio::test]
+async fn test_dont_poll_streams_concurrently_with_their_own_bodies() {
+    let foo_running = Cell::new(false);
+    let foo = async || {
+        assert!(!foo_running.get(), "only one call to `foo` at a time");
+        foo_running.set(true);
+        sleep(Duration::from_millis(10)).await;
+        foo_running.set(false);
+        42
+    };
+    let foo_stream = stream::iter(0..3).then(|_| foo());
+    join!(
+        x in foo_stream => {
+            // Sanity check: we're actually running `foo` in the stream and not yielding futures.
+            assert_eq!(x, 42);
+            // The real test: If we drive the stream concurrently with its body, we'll fail the
+            // assert in `foo`.
+            foo().await;
+        },
+    );
 }
