@@ -179,8 +179,14 @@ impl Parse for JoinMeMaybe {
 /// machinery handles that, and we don't need to worry about it. (I.e. if one arm releases a
 /// `Mutex` that another arm wants to take, the whole macro is going to get polled again.) However,
 /// we need to be careful about ways that the macro itself can unblock one of its arms without
-/// invoking a waker. Currently the only case of that is when consuming a stream item unblocks the
-/// stream that produced it.
+/// invoking a waker. Currently the only case of that is when finishing a stream body unblocks the
+/// corresponding stream.
+///
+/// - We don't currently drive streams concurrently with their own bodies. We could, since we need
+/// a buffer slot for one item either way (only one body can run at a time, and another body might
+/// already be running when an item is yielded), but it seems cleaner not to. If buffered streams
+/// are eventually fixed with `poll_progress` or similar, users will be able to add this sort of
+/// concurrency themselves as needed.
 impl ToTokens for JoinMeMaybe {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
         // Define the finished flags and cancellers here at the top.
@@ -251,6 +257,12 @@ impl ToTokens for JoinMeMaybe {
                 }
             }
         }
+        let stream_body_finished = format_ident!("stream_body_finished", span = Span::mixed_site());
+        initializers.extend(quote! {
+            // This flag gets cleared right before `#run_bodies_fn`, so its initial value doesn't
+            // matter.
+            let #stream_body_finished = ::core::sync::atomic::AtomicBool::new(false);
+        });
 
         // Now define all the arm futures, which will have references to the cancellers above
         // in-scope.
@@ -262,6 +274,12 @@ impl ToTokens for JoinMeMaybe {
             .collect();
         let arm_outputs: Vec<_> = (0..self.arms.len())
             .map(|i| format_ident!("arm_{i}_output", span = Span::mixed_site()))
+            .collect();
+        // The body-running flags are only used for streams, to delay re-polling the stream until
+        // the currently running body is finished. (We also look at the item slot, so we don't
+        // re-poll until the item is None *and* the body is not running.)
+        let arm_body_running_flags: Vec<_> = (0..self.arms.len())
+            .map(|i| format_ident!("arm_{i}_body_running", span = Span::mixed_site()))
             .collect();
         let mut arm_pins = Vec::new(); // Pin<&mut Option<T>>
         for i in 0..self.arms.len() {
@@ -305,9 +323,11 @@ impl ToTokens for JoinMeMaybe {
                     stream, finally, ..
                 } => {
                     let pinned_and_wrapped = pin_and_wrap(stream);
+                    let body_running_flag = &arm_body_running_flags[i];
                     initializers.extend(quote! {
                         #pinned_and_wrapped
                         let mut #arm_item = ::core::option::Option::None;
+                        let mut #body_running_flag = ::core::sync::atomic::AtomicBool::new(false);
                     });
                     if finally.is_some() {
                         let should_run_finally = &should_run_finally_flag_names[i];
@@ -337,6 +357,8 @@ impl ToTokens for JoinMeMaybe {
             env!("CARGO_PKG_VERSION").replace('.', "_"),
         );
         let output_temporary = format_ident!("_output");
+        // We need to note when stream bodies finish, because in general that means we need to
+        // re-run the outer loop immediately.
         for (i, arm) in self.arms.iter().enumerate() {
             let arm_output = &arm_outputs[i];
             if let ArmKind::FutureAndBody { pattern, body, .. } = &arm.kind {
@@ -351,14 +373,15 @@ impl ToTokens for JoinMeMaybe {
                         let #output_temporary = {
                             #body
                         };
+                        // A short-circuiting return in the body drops the output on the floor, but
+                        // that's fine, because the whole macro gets cancelled.
                         #[allow(unreachable_code)]
                         {
                             #arm_output = ::core::option::Option::Some(#output_temporary);
                         }
                     }
                 });
-            }
-            if let ArmKind::StreamAndBody {
+            } else if let ArmKind::StreamAndBody {
                 pattern,
                 body,
                 finally,
@@ -370,21 +393,31 @@ impl ToTokens for JoinMeMaybe {
                 let variant_name = format_ident!("Arm{i}");
                 bodies_input_enum_generic_params.extend(quote! { #param_name, });
                 bodies_input_enum_variants.extend(quote! { #variant_name(#param_name), });
-                // Stream bodies always output `()`.
+                let body_running_flag = &arm_body_running_flags[i];
                 bodies_match_arms.extend(quote! {
                     #private_module_name::ArmsInput::#variant_name(#pattern) => {
+                        // Stream bodies always output `()`.
                         let _: () = #body;
+                        // A short-circuiting return in the body skips clearing the body running
+                        // flag, but that's fine, because the whole macro gets cancelled.
+                        #[allow(unreachable_code)]
+                        {
+                            #body_running_flag.store(false, ::core::sync::atomic::Ordering::Relaxed);
+                            #stream_body_finished.store(true, ::core::sync::atomic::Ordering::Relaxed);
+                        }
                     }
                 });
                 if let Some(finally) = finally {
                     let variant_name = format_ident!("Arm{i}Finally");
-                    // Stream finally expressions have no input.
                     bodies_input_enum_variants.extend(quote! { #variant_name, });
                     bodies_match_arms.extend(quote! {
+                        // Stream finally expressions have no input.
                         #private_module_name::ArmsInput::#variant_name => {
                             let #output_temporary = {
                                 #finally
                             };
+                            // A short-circuiting return in the finally drops the output on the
+                            // floor, but that's fine, because the whole macro gets cancelled.
                             #[allow(unreachable_code)]
                             {
                                 #arm_output = ::core::option::Option::Some(#output_temporary);
@@ -499,6 +532,7 @@ impl ToTokens for JoinMeMaybe {
                     }
                 }
                 ArmKind::StreamAndBody { finally, .. } => {
+                    let body_running_flag = &arm_body_running_flags[i];
                     let set_should_run_finally = if finally.is_some() {
                         quote! {
                             #arm_should_run_finally = true;
@@ -507,23 +541,32 @@ impl ToTokens for JoinMeMaybe {
                         quote! {}
                     };
                     quote! {
-                        match ::join_me_maybe::_impl::PollNextOnce(#future_or_stream).await {
-                            ::core::task::Poll::Ready(::core::option::Option::Some(item)) => {
-                                // The stream has yielded an item, which needs to be consumed by
-                                // the body. We're returning `false` here, because the stream isn't
-                                // finished, but note that we haven't registered a wakeup. If the
-                                // body closure consumes this item, it will rerun the whole
-                                // top-level loop, to give us a chance to poll this stream again.
-                                // See `#item_consumed_from_live_stream`.
-                                #arm_item = ::core::option::Option::Some(item);
-                                false
+                        if #arm_item.is_none() && !#body_running_flag.load(::core::sync::atomic::Ordering::Relaxed) {
+                            match ::join_me_maybe::_impl::PollNextOnce(#future_or_stream).await {
+                                ::core::task::Poll::Ready(::core::option::Option::Some(item)) => {
+                                    // The stream has yielded an item, which needs to be consumed
+                                    // by the body. We're returning `false` here, because the
+                                    // stream isn't finished, but note that we haven't registered a
+                                    // wakeup. This item will eventually be consumed by the body
+                                    // closure, and we always rerun the outer loop when the body
+                                    // closure finishes, which will bring us back here. See
+                                    // `#stream_body_finished`.
+                                    debug_assert!(#arm_item.is_none());
+                                    #arm_item = ::core::option::Option::Some(item);
+                                    false
+                                }
+                                ::core::task::Poll::Ready(None) => {
+                                    // The stream is finished.
+                                    #set_should_run_finally
+                                    true
+                                }
+                                ::core::task::Poll::Pending => false,
                             }
-                            ::core::task::Poll::Ready(None) => {
-                                // The stream is finished.
-                                #set_should_run_finally
-                                true
-                            }
-                            ::core::task::Poll::Pending => false,
+                        } else {
+                            // Either an item is already buffered, or the body is already running.
+                            // We definitely don't want to drop items, and as a design choice we
+                            // don't drive the stream concurrently with its own body.
+                            false
                         }
                     }
                 }
@@ -636,23 +679,25 @@ impl ToTokens for JoinMeMaybe {
                 });
             }
         }
-        let drop_cancelled = quote! {
-            if #definitely_finished {
-                #drop_maybe
+        if !drop_maybe.is_empty() {
+            drop_maybe = quote! {
+                if #definitely_finished {
+                    #drop_maybe
+                }
             }
+        }
+        let drop_cancelled = quote! {
+            #drop_maybe
             #drop_labeled
         };
 
         // The run bodies loop. As long as there are items available, and we don't have an existing
         // `#run_body_future` that's returned `Pending`, keep trying to consume items.
         let mut try_to_call_run_body = TokenStream2::new();
-        // We need to keep looping without returning `Pending` if running bodies might've unblocked
-        // some of the scrutinees. This can happen when an item is consumed from a stream.
-        let item_consumed_from_live_stream =
-            format_ident!("item_consumed_from_live_stream", span = Span::mixed_site());
+        // We need to keep looping without yielding `Pending` if a finished body might've unblocked
+        // a scrutinee stream. The normal async waker machinery doesn't do that for us.
         for i in 0..self.arms.len() {
             let arm = &self.arms[i];
-            let arm_name = &arm_names[i];
             let arm_item = &arm_items[i];
             let body_is_maybe_value = arm.is_maybe;
             let body_cancelled_flag_value = if arm.cancel_label.is_some() {
@@ -661,13 +706,21 @@ impl ToTokens for JoinMeMaybe {
             } else {
                 quote! { None }
             };
+            let mut set_body_running_flag_if_stream = TokenStream2::new();
+            if matches!(arm.kind, ArmKind::StreamAndBody { .. }) {
+                let body_running_flag = &arm_body_running_flags[i];
+                set_body_running_flag_if_stream.extend(quote! {
+                    #body_running_flag.store(true, ::core::sync::atomic::Ordering::Relaxed);
+                });
+            }
             let set_body_flags_and_continue = quote! {
                 #body_is_maybe = #body_is_maybe_value;
                 #body_cancelled_flag = #body_cancelled_flag_value;
+                #set_body_running_flag_if_stream
                 continue; // Loop again to poll this.
             };
+            let variant_name = format_ident!("Arm{i}");
             if let ArmKind::FutureAndBody { .. } = &arm.kind {
-                let variant_name = format_ident!("Arm{i}");
                 try_to_call_run_body.extend(quote! {
                     if let ::core::option::Option::Some(item) = #arm_item.take() {
                         // Drop-then-assign means that the old value and the new value don't
@@ -686,30 +739,13 @@ impl ToTokens for JoinMeMaybe {
                         #set_body_flags_and_continue
                     }
                 });
-            }
-            if let ArmKind::StreamAndBody { finally, .. } = &arm.kind {
-                let variant_name = format_ident!("Arm{i}");
-                let is_live = if arm.cancel_label.is_some() {
-                    if arm.is_maybe {
-                        // Maybe arms don't have a finished flag. Just inspect the AtomicRefCell
-                        // itself.
-                        quote! { #arm_name.borrow().is_some() }
-                    } else {
-                        let finished_flag = &finished_flag_names[i];
-                        quote! { !#finished_flag.load(::core::sync::atomic::Ordering::Relaxed) }
-                    }
-                } else {
-                    quote! { #arm_name.is_some() }
-                };
+            } else if let ArmKind::StreamAndBody { finally, .. } = &arm.kind {
                 try_to_call_run_body.extend(quote! {
                     if let ::core::option::Option::Some(item) = #arm_item.take() {
                         // SAFETY: See above about `None` and `drop`.
                         #run_body_future = None;
                         drop(#run_body_future);
                         #run_body_future = ::core::option::Option::Some(#run_body_fn(#private_module_name::ArmsInput::#variant_name(item)));
-                        if #is_live {
-                            #item_consumed_from_live_stream = true;
-                        }
                         #set_body_flags_and_continue
                     }
                 });
@@ -853,7 +889,7 @@ impl ToTokens for JoinMeMaybe {
                             break;
                         }
                     }
-                    let mut #item_consumed_from_live_stream = false;
+                    #stream_body_finished.store(false, ::core::sync::atomic::Ordering::Relaxed);
                     #run_bodies_loop
                     // Drop any cancelled scrutinees (either labeled cancellation, or "maybe" arms
                     // after the "definitely" scrutinees have finished). Also drop any pending
@@ -864,11 +900,13 @@ impl ToTokens for JoinMeMaybe {
                         // We are DONE!
                         #drop_run_body_fn
                         break (#return_values);
-                    } else if !#item_consumed_from_live_stream {
-                        // If running bodies didn't unblock any of the scrutinees (either because
-                        // we're done running them, or because no items were consumed from any
-                        // streams), then we can't make further progress right now, and we need to
-                        // yield.
+                    } else if !#stream_body_finished.load(::core::sync::atomic::Ordering::Relaxed) {
+                        // If we just finished a stream body, then we need to do the whole loop
+                        // again, because one of our streams might be able to make progress now.
+                        // (Streams register wakers at "await points" but not at "yield points", so
+                        // we can't rely on normal waker machinery for this.) But otherwise, we've
+                        // driven everything to Pending, and we need to yield to the caller and the
+                        // waker machinery.
                         ::join_me_maybe::_impl::yield_once().await;
                     }
                     // Loop again (either immediately, if we've potentially unblocked a scrutinee,
