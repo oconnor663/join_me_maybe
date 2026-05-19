@@ -959,3 +959,61 @@ async fn test_dont_poll_streams_concurrently_with_their_own_bodies() {
         },
     );
 }
+
+struct DropGuard<F: FnOnce()>(Option<F>);
+
+impl<F: FnOnce()> DropGuard<F> {
+    fn new(f: F) -> Self {
+        Self(Some(f))
+    }
+}
+
+impl<F: FnOnce()> Drop for DropGuard<F> {
+    fn drop(&mut self) {
+        self.0.take().unwrap()();
+    }
+}
+
+#[tokio::test]
+async fn test_drop_during_cancellation_can_cancel_other_arms() {
+    let mutex = tokio::sync::Mutex::new(());
+    join!(
+        foo: async {
+            // This arm takes the lock (immediately) and tries to hold it forever.
+            let _lock_guard = mutex.try_lock().expect("this runs first");
+            sleep(Duration::from_secs(1_000_000)).await;
+        },
+        bar: async {
+            // This arm will cancel the first arm when it's cancelled and (crucially) dropped.
+            let _drop_guard = DropGuard::new(|| {
+                foo.cancel();
+            });
+            sleep(Duration::from_secs(1_000_000)).await;
+        },
+        async {
+            // Double check that the first arm already took the mutex.
+            assert!(mutex.try_lock().is_err(), "should be locked");
+
+            // Now cancel the second arm. This should drop it promptly, which will cancel the first
+            // arm, and then we shold drop that promptly. That will allow us to take the lock
+            // promptly. In detail:
+            //
+            // 1. `bar.cancel()` sets cancel flags (but doesn't directly drop anything).
+            // 2. `mutex.lock().await` sees the lock is held, stashes a waker, and yields Pending.
+            // 3. The `join!` loop proceeds to cancellation and drops `bar`.
+            // 4. Cleaning up `_drop_guard` in `bar` cancels `foo`.
+            // 5. The `join!` loop notices `foo` is also cancelled and drops `foo`.
+            // 6. Cleaning up `_lock_guard` in `foo` invokes the waker that we stashed in step 2.
+            // 7. The `join!` loop finishes cancellation and yields Pending.
+            // 8. Because of the waker that got invoked in step 6, the caller promptly re-polls.
+            // 9. The `join!` loop re-polls this arm, it acquires the mutex, and everything exits.
+            //
+            // Step 5 is where this is likely to go wrong, and it's the main thing this test is
+            // exercising. `foo` comes before `bar` in the cancellation order, so a naive
+            // implementation could drop `bar` and then fail to notice that `foo` now needs to be
+            // dropped too. That mistake deadlocks this test case.
+            bar.cancel();
+            _ = mutex.lock().await;
+        }
+    );
+}
