@@ -20,7 +20,12 @@ promptly.
   again. This applies to both forms of cancellation, explicit `.cancel()` calls
   and also "maybe" arms after the "definitely" arms are finished.
 - Cancelled arms, running bodies/finally expressions, and pending yielded items
-  must be dropped before the macro yields back to its caller.
+  must be dropped promptly, i.e. before the macro yields back to its caller.
+- This includes cases where dropping one cancelled arm causes another labeled
+  arm to be `.cancel()`ed. This is extremely unlikely in practice, but our test
+  cases include custom drop guards to exercise it. (It's much more common that
+  dropping one arm invokes a waker that leads to the whole macro getting
+  re-polled. This doesn't require special support from the macro.)
 - Arm bodies run one at a time and may mutate shared local state.
 - Streams are not polled concurrently with their own body. This is intentional.
 - `finally` runs after natural stream completion, but not after cancellation.
@@ -50,3 +55,9 @@ promptly.
   poll them, and there's no practical way we can work around it if they don't.
   (E.g. you could set some global flag to unpause your future/stream, and
   there's no way for us to know that you did that.)
+- Like the simple `join` functions in the `futures` crate, `join!` passes the
+  caller's waker unmodified to each arm, and we don't know which arm(s) invoked
+  it. This means we can re-poll arms that aren't yet ready to make progress. We
+  can also poll arms more than once in between yields, in the rare case where
+  dropping one arm cancels another. Futures are expected to tolerate these
+  extra polls.
