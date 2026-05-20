@@ -649,73 +649,6 @@ impl ToTokens for JoinMeMaybe {
             }
         }
 
-        // When a future gets cancelled, that means two thing. First, the obvious one, it shouldn't
-        // ever get polled again. But second -- and it's easy to miss this part -- it needs to get
-        // *dropped promptly*. Consider a case where one arm is holding an async lock, and another
-        // arm is trying to acquire it. If the first arm is cancelled but not dropped, then the
-        // second arm will deadlock. See "Futurelock": https://rfd.shared.oxide.computer/rfd/0609.
-        let mut drop_maybe = TokenStream2::new();
-        let mut drop_labeled = TokenStream2::new();
-        for i in 0..self.arms.len() {
-            let arm = &self.arms[i];
-            let cancelled_flag = &cancelled_flag_names[i];
-            let arm_pin = &arm_pins[i];
-            // An even subtler version of the same rule is that arm *items* must also get dropped
-            // promptly. These are the ready values of future arms with bodies, or the items
-            // yielded from streams. These need to get dropped as soon as we know the corresponding
-            // body will never run. It's rare that this matters, but the value of a future could be
-            // for example a `MutexGuard`.
-            let mut drop_item = TokenStream2::new();
-            if matches!(
-                arm.kind,
-                ArmKind::FutureAndBody { .. } | ArmKind::StreamAndBody { .. },
-            ) {
-                let arm_item = &arm_items[i];
-                drop_item.extend(quote! {
-                    #arm_item = None;
-                });
-            }
-            if arm.is_maybe {
-                drop_maybe.extend(quote! {
-                    #arm_pin.set(::core::option::Option::None);
-                    #drop_item
-                });
-            }
-            if self.arms[i].cancel_label.is_some() {
-                drop_labeled.extend(quote! {
-                    if #cancelled_flag.load(::core::sync::atomic::Ordering::Relaxed) {
-                        #arm_pin.set(::core::option::Option::None);
-                        #drop_item
-                    }
-                });
-            }
-        }
-        if !drop_maybe.is_empty() {
-            drop_maybe = quote! {
-                if #definitely_finished {
-                    #drop_maybe
-                }
-            }
-        }
-        let drop_cancelled = quote! {
-            let mut pre_cancelled_count = #cancelled_count.load(::core::sync::atomic::Ordering::Relaxed);
-            loop {
-                #drop_maybe
-                #drop_labeled
-                // The whole reason the `cancelled_count` exists is so we can detect when dropping
-                // one arm cancels another arm here. This is going to be *extremely* rare outside
-                // of our own test cases, but when this happens we need to loop back through the
-                // entire drop order. See `test_drop_during_cancellation_can_cancel_other_arms`.
-                let post_cancelled_count = #cancelled_count.load(::core::sync::atomic::Ordering::Relaxed);
-                if post_cancelled_count != pre_cancelled_count {
-                    pre_cancelled_count = post_cancelled_count;
-                    continue;
-                } else {
-                    break;
-                }
-            }
-        };
-
         // The run bodies loop. As long as there are items available, and we don't have an existing
         // `#run_body_future` that's returned `Pending`, keep trying to consume items.
         let mut try_to_call_run_body = TokenStream2::new();
@@ -792,11 +725,11 @@ impl ToTokens for JoinMeMaybe {
             }
         }
         let mut run_bodies_loop = TokenStream2::new();
+        let body_is_cancelled = quote! {
+            ((#body_is_maybe && #definitely_finished)
+                || #body_cancelled_flag.is_some_and(|flag| flag.load(::core::sync::atomic::Ordering::Relaxed)))
+        };
         if has_bodies {
-            let body_is_cancelled = quote! {
-                ((#body_is_maybe && #definitely_finished)
-                    || #body_cancelled_flag.is_some_and(|flag| flag.load(::core::sync::atomic::Ordering::Relaxed)))
-            };
             run_bodies_loop.extend(quote! {
                 loop {
                     // Check whether the currently running body (if any) is cancelled. We need to
@@ -856,6 +789,71 @@ impl ToTokens for JoinMeMaybe {
                 }
             });
         }
+
+        // When a future gets cancelled, that means two thing. First, the obvious one, it shouldn't
+        // ever get polled again. But second -- and it's easy to miss this part -- it needs to get
+        // *dropped promptly*. Consider a case where one arm is holding an async lock, and another
+        // arm is trying to acquire it. If the first arm is cancelled but not dropped, then the
+        // second arm will deadlock. See "Futurelock": https://rfd.shared.oxide.computer/rfd/0609.
+        let mut drop_maybe = TokenStream2::new();
+        let mut drop_labeled = TokenStream2::new();
+        for i in 0..self.arms.len() {
+            let arm = &self.arms[i];
+            let cancelled_flag = &cancelled_flag_names[i];
+            let arm_pin = &arm_pins[i];
+            // An even subtler version of the same rule is that arm *items* must also get dropped
+            // promptly. These are the ready values of future arms with bodies, or the items
+            // yielded from streams. These need to get dropped as soon as we know the corresponding
+            // body will never run. It's rare that this matters, but the value of a future could be
+            // for example a `MutexGuard`.
+            let mut drop_item = TokenStream2::new();
+            if matches!(
+                arm.kind,
+                ArmKind::FutureAndBody { .. } | ArmKind::StreamAndBody { .. },
+            ) {
+                let arm_item = &arm_items[i];
+                drop_item.extend(quote! {
+                    #arm_item = None;
+                });
+            }
+            if arm.is_maybe {
+                drop_maybe.extend(quote! {
+                    #arm_pin.set(::core::option::Option::None);
+                    #drop_item
+                });
+            }
+            if self.arms[i].cancel_label.is_some() {
+                drop_labeled.extend(quote! {
+                    if #cancelled_flag.load(::core::sync::atomic::Ordering::Relaxed) {
+                        #arm_pin.set(::core::option::Option::None);
+                        #drop_item
+                    }
+                });
+            }
+        }
+        if !drop_maybe.is_empty() {
+            drop_maybe = quote! {
+                if #definitely_finished {
+                    #drop_maybe
+                }
+            }
+        }
+        let drop_cancelled = quote! {
+            let pre_cancelled_count = #cancelled_count.load(::core::sync::atomic::Ordering::Relaxed);
+            #drop_maybe
+            #drop_labeled
+            // The whole reason the `cancelled_count` exists is so we can detect when dropping one
+            // arm cancels another arm here. This is going to be *extremely* rare outside of our
+            // own test cases, but when this happens we need to loop back through the entire drop
+            // order. See `test_drop_during_cancellation_can_cancel_other_arms`.
+            let post_cancelled_count = #cancelled_count.load(::core::sync::atomic::Ordering::Relaxed);
+            if pre_cancelled_count != post_cancelled_count {
+                // If one arm cancels another, we could handle that by just rerunning this
+                // drop_cancelled section. But if an arm cancels the running body, we might need to
+                // rerun the whole body loop. For simplicity, continue the entire outer loop.
+                continue;
+            }
+        };
 
         let mut return_values = TokenStream2::new();
         for (arm, arm_output) in self.arms.iter().zip(&arm_outputs) {

@@ -1017,3 +1017,36 @@ async fn test_drop_during_cancellation_can_cancel_other_arms() {
         }
     );
 }
+
+#[tokio::test]
+async fn test_drop_during_cancellation_can_cancel_running_body() {
+    let mutex = tokio::sync::Mutex::new(());
+    let mut bar_body_started = false;
+    join!(
+        foo: async {
+            // This arm takes the lock (immediately) and tries to hold it forever.
+            let _lock_guard = mutex.try_lock().expect("this runs first");
+            sleep(Duration::from_secs(1_000_000)).await;
+        },
+        bar: _ = ready(()) => {
+            // This arm sleeps forever *in its body*, blocking the following body.
+            bar_body_started = true;
+            sleep(Duration::from_secs(1_000_000)).await;
+        },
+        _ = ready(()) => {
+            // This arm's body cancels `foo`, but it's blocked by `bar`s body.
+            foo.cancel();
+        },
+        async {
+            // Double check that the first arm already took the mutex.
+            assert!(mutex.try_lock().is_err(), "should be locked");
+            // Give `bar`s body a chance to start.
+            sleep(Duration::from_millis(10)).await;
+            // Now cancel `bar`. This cancels its running body, which should unblock the third
+            // arm's body to cancel `foo`, releasing the mutex.
+            bar.cancel();
+            _ = mutex.lock().await;
+        }
+    );
+    assert!(bar_body_started);
+}
