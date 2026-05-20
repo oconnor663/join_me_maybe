@@ -197,6 +197,13 @@ impl ToTokens for JoinMeMaybe {
         initializers.extend(quote! {
             let #definitely_finished_count = ::core::sync::atomic::AtomicUsize::new(0);
         });
+        // The `cancelled_count` is only needed for a very niche purpose: to detect when *dropping*
+        // a cancelled future/stream cancels a different one. See the test case
+        // `test_drop_during_cancellation_can_cancel_other_arms`.
+        let cancelled_count = format_ident!("cancelled_count", span = Span::mixed_site());
+        initializers.extend(quote! {
+            let #cancelled_count = ::core::sync::atomic::AtomicUsize::new(0);
+        });
         // Finished flags are set whenever a "labeled definitely" stream/future completes, either
         // naturally or by being cancelled. We use these to make sure the
         // `definitely_finished_count` gets bumped exactly once for each. ("Unlabeled definitely"
@@ -237,6 +244,7 @@ impl ToTokens for JoinMeMaybe {
                         #[allow(unused_variables)]
                         let #label = &::join_me_maybe::_impl::new_canceller(
                             &#cancelled_flag_name,
+                            &#cancelled_count,
                             None,
                             &#definitely_finished_count,
                         );
@@ -250,6 +258,7 @@ impl ToTokens for JoinMeMaybe {
                         #[allow(unused_variables)]
                         let #label = &::join_me_maybe::_impl::new_canceller(
                             &#cancelled_flag_name,
+                            &#cancelled_count,
                             ::core::option::Option::Some(&#finished_flag_name),
                             &#definitely_finished_count,
                         );
@@ -445,6 +454,7 @@ impl ToTokens for JoinMeMaybe {
                             #[allow(unused_variables)]
                             let #label = &::join_me_maybe::_impl::new_canceller_mut(
                                 &#cancelled_flag,
+                                &#cancelled_count,
                                 None,
                                 &#definitely_finished_count,
                                 &#arm_name,
@@ -456,6 +466,7 @@ impl ToTokens for JoinMeMaybe {
                             #[allow(unused_variables)]
                             let #label = &::join_me_maybe::_impl::new_canceller_mut(
                                 &#cancelled_flag,
+                                &#cancelled_count,
                                 ::core::option::Option::Some(&#finished_flag),
                                 &#definitely_finished_count,
                                 &#arm_name,
@@ -687,8 +698,22 @@ impl ToTokens for JoinMeMaybe {
             }
         }
         let drop_cancelled = quote! {
-            #drop_maybe
-            #drop_labeled
+            let mut pre_cancelled_count = #cancelled_count.load(::core::sync::atomic::Ordering::Relaxed);
+            loop {
+                #drop_maybe
+                #drop_labeled
+                // The whole reason the `cancelled_count` exists is so we can detect when dropping
+                // one arm cancels another arm here. This is going to be *extremely* rare outside
+                // of our own test cases, but when this happens we need to loop back through the
+                // entire drop order. See `test_drop_during_cancellation_can_cancel_other_arms`.
+                let post_cancelled_count = #cancelled_count.load(::core::sync::atomic::Ordering::Relaxed);
+                if post_cancelled_count != pre_cancelled_count {
+                    pre_cancelled_count = post_cancelled_count;
+                    continue;
+                } else {
+                    break;
+                }
+            }
         };
 
         // The run bodies loop. As long as there are items available, and we don't have an existing

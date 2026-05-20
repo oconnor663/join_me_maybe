@@ -413,6 +413,10 @@ pub use join_me_maybe_impl::join;
 /// The type that provides the `.cancel()` method for labeled arguments
 pub struct Canceller<'a> {
     cancelled: &'a AtomicBool,
+    // The `cancelled_count` is only needed for a very niche purpose: to detect when *dropping* a
+    // cancelled future/stream cancels a different one. See the test case
+    // `test_drop_during_cancellation_can_cancel_other_arms`.
+    cancelled_count: &'a AtomicUsize,
     finished: Option<&'a AtomicBool>, // only Some for "definitely" arms
     definitely_count: &'a AtomicUsize,
 }
@@ -423,7 +427,11 @@ impl<'a> Canceller<'a> {
     pub fn cancel(&self) {
         // We can't drop the corresponding future/stream here, even if we had a reference to it,
         // because in the self-cancellation case the AtomicRefCell would panic.
-        self.cancelled.store(true, Relaxed);
+        let already_cancelled = self.cancelled.swap(true, Relaxed);
+        if !already_cancelled {
+            // The cancelled count is needed for a *very* specific purpose
+            self.cancelled_count.fetch_add(1, Relaxed);
+        }
         if let Some(finished) = self.finished {
             let already_finished = finished.swap(true, Relaxed);
             if !already_finished {
@@ -501,11 +509,13 @@ pub mod _impl {
 
     pub fn new_canceller<'a>(
         cancelled: &'a AtomicBool,
+        cancelled_count: &'a AtomicUsize,
         finished: Option<&'a AtomicBool>,
         definitely_count: &'a AtomicUsize,
     ) -> Canceller<'a> {
         Canceller {
             cancelled,
+            cancelled_count,
             finished,
             definitely_count,
         }
@@ -513,6 +523,7 @@ pub mod _impl {
 
     pub fn new_canceller_mut<'a, T>(
         cancelled: &'a AtomicBool,
+        cancelled_count: &'a AtomicUsize,
         finished: Option<&'a AtomicBool>,
         definitely_count: &'a AtomicUsize,
         labeled_cell: &'a AtomicRefCell<Pin<&'a mut Option<T>>>,
@@ -520,6 +531,7 @@ pub mod _impl {
         CancellerMut {
             canceller: Canceller {
                 cancelled,
+                cancelled_count,
                 finished,
                 definitely_count,
             },
