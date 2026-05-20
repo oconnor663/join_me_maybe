@@ -44,3 +44,9 @@ promptly.
 - We don't currently force yields to the caller if the user provides an
   always-ready stream. In theory we could (if we invoked our own waker before
   yielding), but this is not currently considered a bug.
+- If something puts a pending future or stream into a state where it's able to
+  make progress, but it doesn't invoke a waker, it's not our fault if that
+  leads to a hang. It's mandatory that futures invoke wakers when it's time to
+  poll them, and there's no practical way we can work around it if they don't.
+  (E.g. you could set some global flag to unpause your future/stream, and
+  there's no way for us to know that you did that.)
