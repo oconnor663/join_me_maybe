@@ -100,7 +100,7 @@ let mut counter = 0;
 let output = join!(
     n = std::future::ready(1) => {
         counter += n;
-        42
+        "body"
     },
     m = async {
         sleep(Duration::from_millis(1)).await;
@@ -109,7 +109,7 @@ let output = join!(
 );
 assert_eq!(counter, 2);
 // When a `=>` body is present, the output is the value of the body.
-assert_eq!(output, (42, ()));
+assert_eq!(output, ("body", ()));
 ```
 
 Also like `select!`, it's possible to `.await` or `return` in an arm body. (However, `break` or
@@ -209,7 +209,7 @@ let ret = join!(
     // This `maybe` arm's `finally` block gets cancelled when the sleep above finishes.
     maybe _ in stream::iter([42]) => {} finally {
         tokio::time::sleep(Duration::from_millis(20)).await;
-        2
+        4
     },
 );
 assert_eq!(ret, ((), 1, 2, Some(3), (), None));
@@ -224,7 +224,7 @@ use futures::stream::{self, StreamExt};
 let mut counter = 0;
 join!(
     my_stream: _ in stream::iter(0..5).then(async |_| {
-        sleep(Duration::from_millis(10)).await
+        sleep(Duration::from_millis(20)).await
     }) => {
         // This stream gets cancelled below, so this only executes three times.
         counter += 1;
@@ -234,7 +234,7 @@ join!(
     },
     async {
         // Wait long enough for the stream to yield three items, then cancel it.
-        sleep(Duration::from_millis(35)).await;
+        sleep(Duration::from_millis(70)).await;
         my_stream.cancel();
     },
 );

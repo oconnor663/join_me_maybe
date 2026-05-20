@@ -117,7 +117,7 @@
 //! let output = join!(
 //!     n = std::future::ready(1) => {
 //!         counter += n;
-//!         42
+//!         "body"
 //!     },
 //!     m = async {
 //!         sleep(Duration::from_millis(1)).await;
@@ -126,7 +126,7 @@
 //! );
 //! assert_eq!(counter, 2);
 //! // When a `=>` body is present, the output is the value of the body.
-//! assert_eq!(output, (42, ()));
+//! assert_eq!(output, ("body", ()));
 //! # }
 //! ```
 //!
@@ -243,7 +243,7 @@
 //!     // This `maybe` arm's `finally` block gets cancelled when the sleep above finishes.
 //!     maybe _ in stream::iter([42]) => {} finally {
 //!         tokio::time::sleep(Duration::from_millis(20)).await;
-//!         2
+//!         4
 //!     },
 //! );
 //! assert_eq!(ret, ((), 1, 2, Some(3), (), None));
